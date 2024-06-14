@@ -1,0 +1,26 @@
+From 8e36b61c8909452005ba651a8086040fbd44d2d7 Mon Sep 17 00:00:00 2001
+From: Philippe Normand <philn@igalia.com>
+Date: Fri, 14 Jun 2024 09:17:42 +0100
+Subject: [PATCH] WebKitSettings: Enable WebRTC by default
+
+That's a temporary hack. This should be done from the Tauri app. Somehow.
+---
+ Source/WebKit/UIProcess/API/glib/WebKitSettings.cpp | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/Source/WebKit/UIProcess/API/glib/WebKitSettings.cpp b/Source/WebKit/UIProcess/API/glib/WebKitSettings.cpp
+index 09f71008ca27..d345ff6a6429 100644
+--- a/Source/WebKit/UIProcess/API/glib/WebKitSettings.cpp
++++ b/Source/WebKit/UIProcess/API/glib/WebKitSettings.cpp
+@@ -1621,7 +1621,7 @@ static void webkit_settings_class_init(WebKitSettingsClass* klass)
+         "enable-webrtc",
+         _("Enable WebRTC"),
+         _("Whether WebRTC content should be handled"),
+-        FALSE,
++        TRUE,
+         readWriteConstructParamFlags);
+ 
+     /**
+-- 
+2.45.1
+
