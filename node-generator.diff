@@ -1,0 +1,13 @@
+diff --git a/node/flatpak_node_generator/providers/special.py b/node/flatpak_node_generator/providers/special.py
+index 4fb9a52..08b522a 100644
+--- a/node/flatpak_node_generator/providers/special.py
++++ b/node/flatpak_node_generator/providers/special.py
+@@ -356,7 +356,7 @@ class SpecialSourceProvider:
+                 if revision < 1140:
+                     dl_file = 'firefox-linux.zip'
+                 else:
+-                    dl_file = 'firefox-ubuntu-18.04.zip'
++                    dl_file = 'firefox-ubuntu-20.04.zip'
+             elif name == 'webkit':
+                 url_tp = 'https://playwright.azureedge.net/builds/webkit/%d/%s'
+                 if revision < 1317:

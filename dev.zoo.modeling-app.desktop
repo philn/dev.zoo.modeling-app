@@ -1,0 +1,10 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+
+Name=Zoo Modeling App
+Comment=The KittyCAD modeling app.
+Icon=zoo-logo
+Exec=/app/bin/app-launcher.sh
+Terminal=false
+Categories=Network;
