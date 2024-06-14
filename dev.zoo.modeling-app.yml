@@ -41,7 +41,9 @@ modules:
       # Will ship in 2.44.3
       - type: patch
         path: 0001-GStreamer-WebRTC-Missing-a-msid-in-offer-after-setti.patch
-
+      # Temporary hack:
+      - type: patch
+        path: 0001-WebKitSettings-Enable-WebRTC-by-default.patch
     buildsystem: cmake-ninja
     config-opts:
       - -DPORT=GTK
