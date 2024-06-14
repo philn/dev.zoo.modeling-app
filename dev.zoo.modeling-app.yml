@@ -1,0 +1,121 @@
+id: dev.zoo.modeling-app
+runtime: org.gnome.Platform
+runtime-version: '46'
+sdk: org.gnome.Sdk
+command: app-launcher.sh
+
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.llvm18
+  - org.freedesktop.Sdk.Extension.node20
+
+finish-args:
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --socket=x11
+  - --share=ipc
+  - --share=network
+  - --device=dri
+  - --filesystem=xdg-documents:rw
+
+build-options:
+  append-path: /usr/lib/sdk/node20/bin:/usr/lib/sdk/llvm18/bin
+  prepend-ld-library-path: /usr/lib/sdk/llvm18/lib
+
+modules:
+  - name: webkit2gtk-4.0
+    sources:
+      - type: archive
+        url: https://webkitgtk.org/releases/webkitgtk-2.44.2.tar.xz
+        sha256: 523f42c8ff24832add17631f6eaafe8f9303afe316ef1a7e1844b952a7f7521b
+        x-checker-data:
+          type: html
+          url: https://webkitgtk.org/releases/
+          version-pattern: LATEST-STABLE-(\d[\.\d]+\d)
+          url-template: https://webkitgtk.org/releases/webkitgtk-$version.tar.xz
+      # Will ship in 2.44.3
+      - type: patch
+        path: 0001-GStreamer-WebRTC-Request-video-key-frame-when-connec.patch
+      # Will ship in 2.44.3
+      - type: patch
+        path: 0001-GStreamer-WebRTC-Incoming-video-track-renderer-shoul.patch
+      # Will ship in 2.44.3
+      - type: patch
+        path: 0001-GStreamer-WebRTC-Missing-a-msid-in-offer-after-setti.patch
+
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DPORT=GTK
+      - -DCMAKE_C_COMPILER=clang
+      - -DCMAKE_CXX_COMPILER=clang++
+      - -DCMAKE_BUILD_TYPE=RelWithDebInfo
+      - -DENABLE_BUBBLEWRAP_SANDBOX=OFF
+      - -DENABLE_DOCUMENTATION=OFF
+      - -DENABLE_GAMEPAD=OFF
+      - -DENABLE_MINIBROWSER=OFF
+      - -DENABLE_WEB_RTC=ON
+      - -DUSE_LIBBACKTRACE=OFF
+      - -DUSE_GTK4=OFF
+      - -DUSE_GSTREAMER_WEBRTC=ON
+      - -DUSE_GSTREAMER_TRANSCODER=OFF
+    modules:
+
+      - name: unifdef
+        no-autogen: true
+        make-install-args:
+          - prefix=${FLATPAK_DEST}
+        sources:
+          - type: archive
+            url: https://dotat.at/prog/unifdef/unifdef-2.12.tar.xz
+            sha256: 43ce0f02ecdcdc723b2475575563ddb192e988c886d368260bc0a63aee3ac400
+        cleanup:
+          - '*'
+
+  - name: node
+    buildsystem: simple
+    build-commands:
+      - /usr/lib/sdk/node20/install.sh
+
+  - name: ZooModelingApp
+    sources:
+      - type: git
+        url: https://github.com/KittyCAD/modeling-app.git
+        tag: v0.22.0
+        commit: 8eee3e1c58561124e6847b89723a33dbbd8b4e0e
+        x-checker-data:
+          type: git
+          tag-pattern: ^v((?:\d+.)*\d+)$
+      - node-sources.json
+      - cargo-sources.json
+      - cargo-wasm-sources.json
+      - type: file
+        path: cargo-config.toml
+      - type: file
+        path: build.sh
+      - type: patch
+        path: 0001-Disable-Tauri-updater-for-flatpak.patch
+    buildsystem: simple
+    build-options:
+      # Network required for wasm binary download. See https://github.com/rustwasm/wasm-pack/issues/821
+      build-args:
+        - --share=network
+
+    build-commands:
+      - ./build.sh
+      - install -Dm755 -t /app/bin/ src-tauri/target/release/zoo-modeling-app
+
+  - name: metadata
+    sources:
+      - type: file
+        path: app-launcher.sh
+      - type: file
+        path: dev.zoo.modeling-app.desktop
+      - type: file
+        path: dev.zoo.modeling-app.appdata.xml
+      - type: file
+        path: dev.zoo.modeling-app.svg
+    buildsystem: simple
+    build-commands:
+      - install -Dm755 -t /app/bin/ app-launcher.sh
+      - install -Dm644 -t /app/share/metainfo/ dev.zoo.modeling-app.appdata.xml
+      - install -Dm644 -t /app/share/applications/ dev.zoo.modeling-app.desktop
+      - install -Dm644 -t /app/share/icons/hicolor/scalable/apps/ dev.zoo.modeling-app.svg

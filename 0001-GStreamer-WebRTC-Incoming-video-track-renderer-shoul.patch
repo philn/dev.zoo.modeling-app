@@ -1,0 +1,84 @@
+From 2ff0a25e8850318798332aebf550bd67bc812a54 Mon Sep 17 00:00:00 2001
+From: Philippe Normand <philn@igalia.com>
+Date: Tue, 14 May 2024 02:33:45 -0700
+Subject: [PATCH] [GStreamer][WebRTC] Incoming video track renderer should rely
+ on the track intrinsic size https://bugs.webkit.org/show_bug.cgi?id=274093
+
+Reviewed by Xabier Rodriguez-Calvar.
+
+Pixel and display aspect ratios shouldn't be applied for WebRTC video tracks. The intrinsic size is
+re-used as it is. The avf MediaStream player behaves similarly.
+
+* Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.cpp:
+(WebCore::MediaPlayerPrivateGStreamer::updateVideoSizeAndOrientationFromCaps):
+* Source/WebCore/platform/mediastream/gstreamer/RealtimeIncomingVideoSourceGStreamer.cpp:
+(WebCore::RealtimeIncomingVideoSourceGStreamer::ensureSizeAndFramerate):
+(WebCore::RealtimeIncomingVideoSourceGStreamer::dispatchSample):
+
+Canonical link: https://commits.webkit.org/278745@main
+---
+ .../gstreamer/MediaPlayerPrivateGStreamer.cpp   | 17 ++++++++++++++---
+ .../RealtimeIncomingVideoSourceGStreamer.cpp    |  4 ++--
+ 2 files changed, 16 insertions(+), 5 deletions(-)
+
+diff --git a/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.cpp b/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.cpp
+index c9973e370960..7240fd9d3897 100644
+--- a/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.cpp
++++ b/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.cpp
+@@ -3724,8 +3724,21 @@ void MediaPlayerPrivateGStreamer::updateVideoSizeAndOrientationFromCaps(const Gs
+     if (m_videoSourceOrientation.usesWidthAsHeight())
+         originalSize = originalSize.transposedSize();
+ 
++    auto scopeExit = makeScopeExit([&] {
++        if (RefPtr player = m_player.get()) {
++            GST_DEBUG_OBJECT(pipeline(), "Notifying sizeChanged event to upper layer");
++            player->sizeChanged();
++        }
++    });
++
+     GST_DEBUG_OBJECT(pipeline(), "Original video size: %dx%d", originalSize.width(), originalSize.height());
+-    GST_DEBUG_OBJECT(pipeline(), "Pixel aspect ratio: %d/%d", pixelAspectRatioNumerator, pixelAspectRatioDenominator);
++    if (isMediaStreamPlayer()) {
++        GST_DEBUG_OBJECT(pipeline(), "Using original MediaStream track video intrinsic size");
++        m_videoSize = originalSize;
++        return;
++    }
++
++    GST_DEBUG_OBJECT(pipeline(), "Applying pixel aspect ratio: %d/%d", pixelAspectRatioNumerator, pixelAspectRatioDenominator);
+ 
+     // Calculate DAR based on PAR and video size.
+     int displayWidth = originalSize.width() * pixelAspectRatioNumerator;
+@@ -3754,8 +3767,6 @@ void MediaPlayerPrivateGStreamer::updateVideoSizeAndOrientationFromCaps(const Gs
+ 
+     GST_DEBUG_OBJECT(pipeline(), "Saving natural size: %" G_GUINT64_FORMAT "x%" G_GUINT64_FORMAT, width, height);
+     m_videoSize = FloatSize(static_cast<int>(width), static_cast<int>(height));
+-    if (RefPtr player = m_player.get())
+-        player->sizeChanged();
+ }
+ 
+ void MediaPlayerPrivateGStreamer::setCachedPosition(const MediaTime& cachedPosition) const
+diff --git a/Source/WebCore/platform/mediastream/gstreamer/RealtimeIncomingVideoSourceGStreamer.cpp b/Source/WebCore/platform/mediastream/gstreamer/RealtimeIncomingVideoSourceGStreamer.cpp
+index 4da97a71deef..a4adc1488666 100644
+--- a/Source/WebCore/platform/mediastream/gstreamer/RealtimeIncomingVideoSourceGStreamer.cpp
++++ b/Source/WebCore/platform/mediastream/gstreamer/RealtimeIncomingVideoSourceGStreamer.cpp
+@@ -103,7 +103,7 @@ void RealtimeIncomingVideoSourceGStreamer::settingsDidChange(OptionSet<RealtimeM
+ void RealtimeIncomingVideoSourceGStreamer::ensureSizeAndFramerate(const GRefPtr<GstCaps>& caps)
+ {
+     if (auto size = getVideoResolutionFromCaps(caps.get()))
+-        setSize({ static_cast<int>(size->width()), static_cast<int>(size->height()) });
++        setIntrinsicSize({ static_cast<int>(size->width()), static_cast<int>(size->height()) });
+ 
+     int frameRateNumerator, frameRateDenominator;
+     auto* structure = gst_caps_get_structure(caps.get(), 0);
+@@ -122,7 +122,7 @@ void RealtimeIncomingVideoSourceGStreamer::dispatchSample(GRefPtr<GstSample>&& s
+     auto* caps = gst_sample_get_caps(sample.get());
+     ensureSizeAndFramerate(GRefPtr<GstCaps>(caps));
+ 
+-    videoFrameAvailable(VideoFrameGStreamer::create(WTFMove(sample), size(), fromGstClockTime(GST_BUFFER_PTS(buffer))), { });
++    videoFrameAvailable(VideoFrameGStreamer::create(WTFMove(sample), intrinsicSize(), fromGstClockTime(GST_BUFFER_PTS(buffer))), { });
+ }
+ 
+ const GstStructure* RealtimeIncomingVideoSourceGStreamer::stats()
+-- 
+2.45.1
+

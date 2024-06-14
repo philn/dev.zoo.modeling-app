@@ -1,0 +1,25 @@
+From 452405aaf7b3ce1380a8ce17be7f193557d3494a Mon Sep 17 00:00:00 2001
+From: Philippe Normand <philn@igalia.com>
+Date: Mon, 24 Jun 2024 16:43:46 +0100
+Subject: [PATCH] Disable Tauri updater for flatpak
+
+---
+ src-tauri/tauri.release.conf.json | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src-tauri/tauri.release.conf.json b/src-tauri/tauri.release.conf.json
+index 7d88d320..b0a00917 100644
+--- a/src-tauri/tauri.release.conf.json
++++ b/src-tauri/tauri.release.conf.json
+@@ -47,7 +47,7 @@
+   },
+   "plugins": {
+     "updater": {
+-      "active": true,
++      "active": false,
+       "endpoints": [
+         "https://dl.zoo.dev/releases/modeling-app/last_update.json"
+       ],
+-- 
+2.45.2
+

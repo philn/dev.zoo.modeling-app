@@ -1,0 +1,58 @@
+From 231262cc356b901d0734046cbbea8555941d6a46 Mon Sep 17 00:00:00 2001
+From: Philippe Normand <philn@igalia.com>
+Date: Thu, 25 Apr 2024 08:52:16 -0700
+Subject: [PATCH] [GStreamer][WebRTC] Request video key-frame when connecting
+ incoming streams https://bugs.webkit.org/show_bug.cgi?id=273238
+
+Reviewed by Xabier Rodriguez-Calvar.
+
+In some cases of remote peer sending H.264, the resulting depayloaded bitstream might not contain
+SPS/PPS informations required for decoding. Without these the parser would discard frames until the
+stream can be parsed, potentially leading to delay in setting up the video decoder. To workaround
+this issue, issue a key-frame request as soon as a new src pad is exposed on webrtcbin, and also
+when adding video pads to the mediastreamsrc element.
+
+* Source/WebCore/platform/mediastream/gstreamer/GStreamerIncomingTrackProcessor.cpp:
+(WebCore::GStreamerIncomingTrackProcessor::incomingTrackProcessor):
+* Source/WebCore/platform/mediastream/gstreamer/GStreamerMediaStreamSource.cpp:
+(webkitMediaStreamSrcPadProbeCb):
+
+Canonical link: https://commits.webkit.org/277980@main
+---
+ .../gstreamer/GStreamerIncomingTrackProcessor.cpp            | 3 +++
+ .../mediastream/gstreamer/GStreamerMediaStreamSource.cpp     | 5 +++++
+ 2 files changed, 8 insertions(+)
+
+diff --git a/Source/WebCore/platform/mediastream/gstreamer/GStreamerIncomingTrackProcessor.cpp b/Source/WebCore/platform/mediastream/gstreamer/GStreamerIncomingTrackProcessor.cpp
+index 979d50ebf347..8d25df9fd0d2 100644
+--- a/Source/WebCore/platform/mediastream/gstreamer/GStreamerIncomingTrackProcessor.cpp
++++ b/Source/WebCore/platform/mediastream/gstreamer/GStreamerIncomingTrackProcessor.cpp
+@@ -129,6 +129,9 @@ GRefPtr<GstElement> GStreamerIncomingTrackProcessor::incomingTrackProcessor()
+     if (m_data.type == RealtimeMediaSource::Type::Audio)
+         return createParser();
+ 
++    GST_DEBUG_OBJECT(m_bin.get(), "Requesting a key-frame");
++    gst_pad_send_event(m_pad.get(), gst_video_event_new_upstream_force_key_unit(GST_CLOCK_TIME_NONE, TRUE, 1));
++
+     bool forceEarlyVideoDecoding = !g_strcmp0(g_getenv("WEBKIT_GST_WEBRTC_FORCE_EARLY_VIDEO_DECODING"), "1");
+     GST_DEBUG_OBJECT(m_bin.get(), "Configuring for input caps: %" GST_PTR_FORMAT "%s", m_data.caps.get(), forceEarlyVideoDecoding ? " and early decoding" : "");
+     if (!forceEarlyVideoDecoding) {
+diff --git a/Source/WebCore/platform/mediastream/gstreamer/GStreamerMediaStreamSource.cpp b/Source/WebCore/platform/mediastream/gstreamer/GStreamerMediaStreamSource.cpp
+index ece08cefd93b..5db3aeb3d0a9 100644
+--- a/Source/WebCore/platform/mediastream/gstreamer/GStreamerMediaStreamSource.cpp
++++ b/Source/WebCore/platform/mediastream/gstreamer/GStreamerMediaStreamSource.cpp
+@@ -1036,6 +1036,11 @@ static GstPadProbeReturn webkitMediaStreamSrcPadProbeCb(GstPad* pad, GstPadProbe
+             return GST_PAD_PROBE_REMOVE;
+         }
+ 
++        if (data->sourceType == RealtimeMediaSource::Type::Video) {
++            GST_DEBUG_OBJECT(self, "Requesting a key-frame");
++            gst_pad_send_event(pad, gst_video_event_new_upstream_force_key_unit(GST_CLOCK_TIME_NONE, TRUE, 1));
++        }
++
+         auto* streamStart = gst_event_new_stream_start(data->trackId.get());
+         gst_event_set_group_id(streamStart, 1);
+         gst_pad_push_event(pad, streamStart);
+-- 
+2.45.1
+

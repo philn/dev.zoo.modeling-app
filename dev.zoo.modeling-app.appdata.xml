@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>dev.zoo.modeling-app</id>
+
+  <name>Zoo Modeling App</name>
+  <summary>The KittyCAD modeling app.</summary>
+  <developer_name>Zoo Team</developer_name>
+
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+
+  <url type="homepage">https://zoo.dev/</url>
+  <url type="bugtracker">https://github.com/KittyCAD/modeling-app/issues</url>
+
+  <supports>
+    <control>touch</control>
+  </supports>
+
+  <recommends>
+    <control>pointing</control>
+    <control>keyboard</control>
+    <display_length compare="ge" side="shortest">330</display_length>
+    <display_length compare="ge" side="longest">360</display_length>
+  </recommends>
+
+  <requires>
+    <internet>always</internet>
+  </requires>
+
+  <categories>
+    <category>Network</category>
+  </categories>
+
+  <description>
+    <p>
+      A CAD application from the future.
+    </p>
+    <p>
+      Modeling App is our take on what a modern modelling experience can be.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">dev.zoo.modeling-app.desktop</launchable>
+  <!-- <screenshots>
+       <screenshot type="default">
+       <image>https://raw.githubusercontent.com/flathub/dev.zoo.App/master/resources/screenshot1.png</image>
+       </screenshot>
+       </screenshots>
+  -->
+  <releases>
+      <release version="0.22.0" date="2024-06-03"/>
+  </releases>
+  <content_rating type="oars-1.1"/>
+</component>
