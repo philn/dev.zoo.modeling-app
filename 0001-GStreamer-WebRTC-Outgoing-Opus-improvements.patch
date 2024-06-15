@@ -1,0 +1,224 @@
+From 7c3380a57b31d1ab78391dba50b0549fd0287f46 Mon Sep 17 00:00:00 2001
+From: Philippe Normand <philn@igalia.com>
+Date: Wed, 10 Apr 2024 04:52:55 -0700
+Subject: [PATCH] [GStreamer][WebRTC] Outgoing Opus improvements
+ https://bugs.webkit.org/show_bug.cgi?id=272390
+
+Reviewed by Xabier Rodriguez-Calvar.
+
+Some WebRTC stacks expect Opus in SDP as "opus" and others "OPUS", so we are now more relient in
+that regard. Our encoder now emits packets with "perfect" timestamps, because Chrome expects that.
+Support for multi-channel is also slightly improved, by checking the encoding-params SDP attribute.
+
+* LayoutTests/platform/glib/fast/mediastream/RTCPeerConnection-inspect-offer-expected.txt:
+* Source/WebCore/Modules/mediastream/gstreamer/GStreamerMediaEndpoint.cpp:
+(WebCore::GStreamerMediaEndpoint::setDescription):
+* Source/WebCore/Modules/mediastream/gstreamer/GStreamerWebRTCUtils.cpp:
+(WebCore::capsFromRtpCapabilities):
+(WebCore::capsFromSDPMedia):
+* Source/WebCore/platform/mediastream/gstreamer/RealtimeOutgoingAudioSourceGStreamer.cpp:
+(WebCore::RealtimeOutgoingAudioSourceGStreamer::setPayloadType):
+* Source/WebCore/platform/mediastream/gstreamer/RealtimeOutgoingVideoSourceGStreamer.cpp:
+(WebCore::RealtimeOutgoingVideoSourceGStreamer::setPayloadType):
+
+Canonical link: https://commits.webkit.org/277296@main
+---
+ ...CPeerConnection-inspect-offer-expected.txt |  4 +-
+ .../gstreamer/GStreamerMediaEndpoint.cpp      |  3 +-
+ .../gstreamer/GStreamerWebRTCUtils.cpp        |  7 ++-
+ .../RealtimeOutgoingAudioSourceGStreamer.cpp  | 47 ++++++++++++++-----
+ .../RealtimeOutgoingVideoSourceGStreamer.cpp  | 18 ++++---
+ 5 files changed, 57 insertions(+), 22 deletions(-)
+
+diff --git a/Source/WebCore/Modules/mediastream/gstreamer/GStreamerMediaEndpoint.cpp b/Source/WebCore/Modules/mediastream/gstreamer/GStreamerMediaEndpoint.cpp
+index ad45f261efa8..c8944fc91874 100644
+--- a/Source/WebCore/Modules/mediastream/gstreamer/GStreamerMediaEndpoint.cpp
++++ b/Source/WebCore/Modules/mediastream/gstreamer/GStreamerMediaEndpoint.cpp
+@@ -573,7 +573,8 @@ void GStreamerMediaEndpoint::setDescription(const RTCSessionDescription* descrip
+             failureCallback(nullptr);
+             return;
+         }
+-        if (gst_sdp_message_new_from_text(reinterpret_cast<const char*>(description->sdp().characters8()), &message.outPtr()) != GST_SDP_OK) {
++        auto sdp = makeStringByReplacingAll(description->sdp(), "opus"_s, "OPUS"_s);
++        if (gst_sdp_message_new_from_text(reinterpret_cast<const char*>(sdp.characters8()), &message.outPtr()) != GST_SDP_OK) {
+             failureCallback(nullptr);
+             return;
+         }
+diff --git a/Source/WebCore/Modules/mediastream/gstreamer/GStreamerWebRTCUtils.cpp b/Source/WebCore/Modules/mediastream/gstreamer/GStreamerWebRTCUtils.cpp
+index d835384c0270..4f2baedc6d1b 100644
+--- a/Source/WebCore/Modules/mediastream/gstreamer/GStreamerWebRTCUtils.cpp
++++ b/Source/WebCore/Modules/mediastream/gstreamer/GStreamerWebRTCUtils.cpp
+@@ -510,7 +510,7 @@ GRefPtr<GstCaps> capsFromRtpCapabilities(RefPtr<UniqueSSRCGenerator> ssrcGenerat
+     for (unsigned index = 0; auto& codec : capabilities.codecs) {
+         auto components = codec.mimeType.split('/');
+         auto* codecStructure = gst_structure_new("application/x-rtp", "media", G_TYPE_STRING, components[0].ascii().data(),
+-            "encoding-name", G_TYPE_STRING, components[1].ascii().data(), "clock-rate", G_TYPE_INT, codec.clockRate, nullptr);
++            "encoding-name", G_TYPE_STRING, components[1].convertToASCIIUppercase().ascii().data() , "clock-rate", G_TYPE_INT, codec.clockRate, nullptr);
+ 
+         auto ssrc = ssrcGenerator->generateSSRC();
+         if (ssrc != std::numeric_limits<uint32_t>::max())
+@@ -598,6 +598,11 @@ GRefPtr<GstCaps> capsFromSDPMedia(const GstSDPMedia* media)
+             gst_structure_remove_fields(structure, "a-setup", "a-ice-ufrag", "a-ice-pwd", "a-sendrecv", "a-inactive",
+                 "a-sendonly", "a-recvonly", "a-end-of-candidates", nullptr);
+ 
++            if (const char* name = gst_structure_get_string(structure, "encoding-name")) {
++                auto encodingName = makeString(name).convertToASCIIUppercase();
++                gst_structure_set(structure, "encoding-name", G_TYPE_STRING, encodingName.ascii().data(), nullptr);
++            }
++
+             // Remove ssrc- attributes that end up being accumulated in fmtp SDP media parameters.
+             gst_structure_filter_and_map_in_place(structure, reinterpret_cast<GstStructureFilterMapFunc>(+[](GQuark quark, GValue*, gpointer) -> gboolean {
+                 return !g_str_has_prefix(g_quark_to_string(quark), "ssrc-");
+diff --git a/Source/WebCore/platform/mediastream/gstreamer/RealtimeOutgoingAudioSourceGStreamer.cpp b/Source/WebCore/platform/mediastream/gstreamer/RealtimeOutgoingAudioSourceGStreamer.cpp
+index fc3e13e7b075..93f1a6d91f38 100644
+--- a/Source/WebCore/platform/mediastream/gstreamer/RealtimeOutgoingAudioSourceGStreamer.cpp
++++ b/Source/WebCore/platform/mediastream/gstreamer/RealtimeOutgoingAudioSourceGStreamer.cpp
+@@ -54,11 +54,14 @@ RTCRtpCapabilities RealtimeOutgoingAudioSourceGStreamer::rtpCapabilities() const
+     return registryScanner.audioRtpCapabilities(GStreamerRegistryScanner::Configuration::Encoding);
+ }
+ 
+-bool RealtimeOutgoingAudioSourceGStreamer::setPayloadType(const GRefPtr<GstCaps>& caps)
++bool RealtimeOutgoingAudioSourceGStreamer::setPayloadType(const GRefPtr<GstCaps>& codecPreferences)
+ {
++    auto caps = adoptGRef(gst_caps_copy(codecPreferences.get()));
+     GST_DEBUG_OBJECT(m_bin.get(), "Setting payload caps: %" GST_PTR_FORMAT, caps.get());
+-    auto* structure = gst_caps_get_structure(caps.get(), 0);
+-    const char* encodingName = gst_structure_get_string(structure, "encoding-name");
++    // FIXME: We use only the first structure of the caps. This not be the right approach specially
++    // we don't have a payloader or encoder for that format.
++    GUniquePtr<GstStructure> structure(gst_structure_copy(gst_caps_get_structure(caps.get(), 0)));
++    const char* encodingName = gst_structure_get_string(structure.get(), "encoding-name");
+     if (!encodingName) {
+         GST_ERROR_OBJECT(m_bin.get(), "encoding-name not found");
+         return false;
+@@ -78,17 +81,30 @@ bool RealtimeOutgoingAudioSourceGStreamer::setPayloadType(const GRefPtr<GstCaps>
+         if (!m_encoder)
+             return false;
+ 
++        gst_structure_set(structure.get(), "encoding-name", G_TYPE_STRING, "OPUS", nullptr);
++
+         // FIXME: Enable dtx too?
+         gst_util_set_object_arg(G_OBJECT(m_encoder.get()), "audio-type", "voice");
++        g_object_set(m_encoder.get(), "perfect-timestamp", TRUE, nullptr);
+ 
+-        const char* useInbandFec = gst_structure_get_string(structure, "useinbandfec");
+-        if (!g_strcmp0(useInbandFec, "1"))
+-            g_object_set(m_encoder.get(), "inband-fec", true, nullptr);
++        if (const char* useInbandFec = gst_structure_get_string(structure.get(), "useinbandfec")) {
++            if (!g_strcmp0(useInbandFec, "1"))
++                g_object_set(m_encoder.get(), "inband-fec", true, nullptr);
++            gst_structure_remove_field(structure.get(), "useinbandfec");
++        }
+ 
+-        const char* isStereo = gst_structure_get_string(structure, "stereo");
+-        if (!g_strcmp0(isStereo, "1"))
+-            m_inputCaps = adoptGRef(gst_caps_new_simple("audio/x-raw", "channels", G_TYPE_INT, 2, nullptr));
++        if (const char* isStereo = gst_structure_get_string(structure.get(), "stereo")) {
++            if (!g_strcmp0(isStereo, "1"))
++                m_inputCaps = adoptGRef(gst_caps_new_simple("audio/x-raw", "channels", G_TYPE_INT, 2, nullptr));
++            gst_structure_remove_field(structure.get(), "stereo");
++        }
+ 
++        if (gst_caps_is_any(m_inputCaps.get())) {
++            if (const char* encodingParameters = gst_structure_get_string(structure.get(), "encoding-params")) {
++                if (auto channels = parseIntegerAllowingTrailingJunk<int>(StringView::fromLatin1(encodingParameters)))
++                    m_inputCaps = adoptGRef(gst_caps_new_simple("audio/x-raw", "channels", G_TYPE_INT, *channels, nullptr));
++            }
++        }
+     } else if (encoding == "g722"_s)
+         m_encoder = makeGStreamerElement("avenc_g722", nullptr);
+     else if (encoding == "pcma"_s)
+@@ -108,23 +124,30 @@ bool RealtimeOutgoingAudioSourceGStreamer::setPayloadType(const GRefPtr<GstCaps>
+     // Align MTU with libwebrtc implementation, also helping to reduce packet fragmentation.
+     g_object_set(m_payloader.get(), "auto-header-extension", TRUE, "mtu", 1200, nullptr);
+ 
+-    if (const char* minPTime = gst_structure_get_string(structure, "minptime")) {
++    if (const char* minPTime = gst_structure_get_string(structure.get(), "minptime")) {
+         auto time = String::fromLatin1(minPTime);
+         if (auto value = parseIntegerAllowingTrailingJunk<int64_t>(time))
+             g_object_set(m_payloader.get(), "min-ptime", *value * GST_MSECOND, nullptr);
++        gst_structure_remove_field(structure.get(), "minptime");
+     }
+ 
+     int payloadType;
+-    if (gst_structure_get_int(structure, "payload", &payloadType))
++    if (gst_structure_get_int(structure.get(), "payload", &payloadType)) {
+         g_object_set(m_payloader.get(), "pt", payloadType, nullptr);
++        gst_structure_remove_field(structure.get(), "payload");
++    }
+ 
+     if (m_payloaderState) {
+         g_object_set(m_payloader.get(), "seqnum-offset", m_payloaderState->seqnum, nullptr);
+         m_payloaderState.reset();
+     }
+ 
++    auto rtpCaps = adoptGRef(gst_caps_new_empty());
++    gst_caps_append_structure(rtpCaps.get(), structure.release());
++
+     g_object_set(m_inputCapsFilter.get(), "caps", m_inputCaps.get(), nullptr);
+-    g_object_set(m_capsFilter.get(), "caps", caps.get(), nullptr);
++    g_object_set(m_capsFilter.get(), "caps", rtpCaps.get(), nullptr);
++    GST_DEBUG_OBJECT(m_bin.get(), "RTP caps: %" GST_PTR_FORMAT, rtpCaps.get());
+ 
+     gst_bin_add_many(GST_BIN_CAST(m_bin.get()), m_payloader.get(), m_encoder.get(), nullptr);
+ 
+diff --git a/Source/WebCore/platform/mediastream/gstreamer/RealtimeOutgoingVideoSourceGStreamer.cpp b/Source/WebCore/platform/mediastream/gstreamer/RealtimeOutgoingVideoSourceGStreamer.cpp
+index a8f4508e3d8b..cd8d2ae8dd86 100644
+--- a/Source/WebCore/platform/mediastream/gstreamer/RealtimeOutgoingVideoSourceGStreamer.cpp
++++ b/Source/WebCore/platform/mediastream/gstreamer/RealtimeOutgoingVideoSourceGStreamer.cpp
+@@ -107,8 +107,10 @@ void RealtimeOutgoingVideoSourceGStreamer::teardown()
+ bool RealtimeOutgoingVideoSourceGStreamer::setPayloadType(const GRefPtr<GstCaps>& caps)
+ {
+     GST_DEBUG_OBJECT(m_bin.get(), "Setting payload caps: %" GST_PTR_FORMAT, caps.get());
+-    auto* structure = gst_caps_get_structure(caps.get(), 0);
+-    const char* encodingName = gst_structure_get_string(structure, "encoding-name");
++    // FIXME: We use only the first structure of the caps. This not be the right approach specially
++    // we don't have a payloader or encoder for that format.
++    GUniquePtr<GstStructure> structure(gst_structure_copy(gst_caps_get_structure(caps.get(), 0)));
++    const char* encodingName = gst_structure_get_string(structure.get(), "encoding-name");
+     if (!encodingName) {
+         GST_ERROR_OBJECT(m_bin.get(), "encoding-name not found");
+         return false;
+@@ -132,7 +134,7 @@ bool RealtimeOutgoingVideoSourceGStreamer::setPayloadType(const GRefPtr<GstCaps>
+             gst_util_set_object_arg(G_OBJECT(m_payloader.get()), "picture-id-mode", "15-bit");
+ 
+         encoderCaps = adoptGRef(gst_caps_new_empty_simple("video/x-vp9"));
+-        if (const char* vp9Profile = gst_structure_get_string(structure, "vp9-profile-id"))
++        if (const char* vp9Profile = gst_structure_get_string(structure.get(), "vp9-profile-id"))
+             gst_caps_set_simple(encoderCaps.get(), "profile", G_TYPE_STRING, vp9Profile, nullptr);
+     } else if (encoding == "h264"_s) {
+         encoderCaps = adoptGRef(gst_caps_new_empty_simple("video/x-h264"));
+@@ -140,7 +142,7 @@ bool RealtimeOutgoingVideoSourceGStreamer::setPayloadType(const GRefPtr<GstCaps>
+         // gst_util_set_object_arg(G_OBJECT(m_payloader.get()), "aggregate-mode", "zero-latency");
+         // g_object_set(m_payloader.get(), "config-interval", -1, nullptr);
+ 
+-        const char* profile = gst_structure_get_string(structure, "profile");
++        const char* profile = gst_structure_get_string(structure.get(), "profile");
+         if (!profile)
+             profile = "baseline";
+         gst_caps_set_simple(encoderCaps.get(), "profile", G_TYPE_STRING, profile, nullptr);
+@@ -163,7 +165,7 @@ bool RealtimeOutgoingVideoSourceGStreamer::setPayloadType(const GRefPtr<GstCaps>
+     }
+ 
+     int payloadType;
+-    if (gst_structure_get_int(structure, "payload", &payloadType))
++    if (gst_structure_get_int(structure.get(), "payload", &payloadType))
+         g_object_set(m_payloader.get(), "pt", payloadType, nullptr);
+ 
+     if (m_payloaderState) {
+@@ -171,7 +173,11 @@ bool RealtimeOutgoingVideoSourceGStreamer::setPayloadType(const GRefPtr<GstCaps>
+         m_payloaderState.reset();
+     }
+ 
+-    g_object_set(m_capsFilter.get(), "caps", caps.get(), nullptr);
++    auto rtpCaps = adoptGRef(gst_caps_new_empty());
++    gst_caps_append_structure(rtpCaps.get(), structure.release());
++
++    g_object_set(m_capsFilter.get(), "caps", rtpCaps.get(), nullptr);
++    GST_DEBUG_OBJECT(m_bin.get(), "RTP caps: %" GST_PTR_FORMAT, rtpCaps.get());
+ 
+     gst_bin_add(GST_BIN_CAST(m_bin.get()), m_payloader.get());
+ 
+-- 
+2.45.1
+
