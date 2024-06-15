@@ -1,0 +1,108 @@
+From da50e63df7f3e6b3090496e1dd8b4221752cdeff Mon Sep 17 00:00:00 2001
+From: Philippe Normand <philn@igalia.com>
+Date: Wed, 20 Mar 2024 12:44:47 -0700
+Subject: [PATCH] [GStreamer][WebRTC] webrtc/connection-state.html started
+ failing after update to 1.24.0 https://bugs.webkit.org/show_bug.cgi?id=271243
+ <rdar://problem/125014192>
+
+Reviewed by Xabier Rodriguez-Calvar.
+
+The `doneGatheringCandidates()` method is called by the PeerConnectionBackend when it's notified
+from gst-webrtc that the ICE gathering is finished, so we don't need to call it ourselves. The
+end-of-candidates SDP attribute shouldn't appear in the offer/answer the end-point reports either.
+This is covered by the webrtc/libwebrtc/descriptionGetters.html test.
+
+* LayoutTests/platform/glib/TestExpectations:
+* Source/WebCore/Modules/mediastream/gstreamer/GStreamerMediaEndpoint.cpp:
+(WebCore::fetchDescription):
+(WebCore::GStreamerMediaEndpoint::doSetLocalDescription):
+(WebCore::GStreamerMediaEndpoint::doSetRemoteDescription):
+(WebCore::GStreamerMediaEndpoint::onIceCandidate):
+
+Canonical link: https://commits.webkit.org/276412@main
+---
+ LayoutTests/platform/glib/TestExpectations    |  2 -
+ .../gstreamer/GStreamerMediaEndpoint.cpp      | 39 ++++++-------------
+ 2 files changed, 12 insertions(+), 29 deletions(-)
+
+diff --git a/Source/WebCore/Modules/mediastream/gstreamer/GStreamerMediaEndpoint.cpp b/Source/WebCore/Modules/mediastream/gstreamer/GStreamerMediaEndpoint.cpp
+index 6b27ffe9c63a..ed21c58789b0 100644
+--- a/Source/WebCore/Modules/mediastream/gstreamer/GStreamerMediaEndpoint.cpp
++++ b/Source/WebCore/Modules/mediastream/gstreamer/GStreamerMediaEndpoint.cpp
+@@ -312,6 +312,15 @@ static std::optional<std::pair<RTCSdpType, String>> fetchDescription(GstElement*
+     if (!description)
+         return { };
+ 
++    unsigned totalAttributesNumber = gst_sdp_message_attributes_len(description->sdp);
++    for (unsigned i = 0; i < totalAttributesNumber; i++) {
++        const auto attribute = gst_sdp_message_get_attribute(description->sdp, i);
++        if (!g_strcmp0(attribute->key, "end-of-candidates")) {
++            gst_sdp_message_remove_attribute(description->sdp, i);
++            break;
++        }
++    }
++
+     GUniquePtr<char> sdpString(gst_sdp_message_as_text(description->sdp));
+     GST_TRACE_OBJECT(webrtcBin, "%s-description SDP: %s", name, sdpString.get());
+     return { { fromSessionDescriptionType(*description.get()), String::fromLatin1(sdpString.get()) } };
+@@ -455,18 +464,9 @@ void GStreamerMediaEndpoint::doSetLocalDescription(const RTCSessionDescription*
+             }
+         }
+ 
+-        // Notify the backend in case all m-lines of the current local description have signalled
+-        // all their ICE candidates.
+-        std::optional<bool> isIceGatheringComplete;
+-        if (descriptions && !descriptions->currentLocalDescriptionSdp.isEmpty())
+-            isIceGatheringComplete = this->isIceGatheringComplete(descriptions->currentLocalDescriptionSdp);
+-
+         GRefPtr<GstWebRTCSCTPTransport> transport;
+         g_object_get(m_webrtcBin.get(), "sctp-transport", &transport.outPtr(), nullptr);
+         m_peerConnectionBackend.setLocalDescriptionSucceeded(WTFMove(descriptions), { }, transport ? makeUnique<GStreamerSctpTransportBackend>(WTFMove(transport)) : nullptr);
+-
+-        if (isIceGatheringComplete && *isIceGatheringComplete)
+-            m_peerConnectionBackend.doneGatheringCandidates();
+     }, [protectedThis = Ref(*this), this](const GError* error) {
+         if (protectedThis->isStopped())
+             return;
+@@ -538,18 +538,9 @@ void GStreamerMediaEndpoint::doSetRemoteDescription(const RTCSessionDescription&
+             }
+         }
+ 
+-        // Notify the backend in case all m-lines of the current local description have signalled
+-        // all their ICE candidates.
+-        std::optional<bool> isIceGatheringComplete;
+-        if (descriptions && !descriptions->currentLocalDescriptionSdp.isEmpty())
+-            isIceGatheringComplete = this->isIceGatheringComplete(descriptions->currentLocalDescriptionSdp);
+-
+         GRefPtr<GstWebRTCSCTPTransport> transport;
+         g_object_get(m_webrtcBin.get(), "sctp-transport", &transport.outPtr(), nullptr);
+         m_peerConnectionBackend.setRemoteDescriptionSucceeded(WTFMove(descriptions), { }, transport ? makeUnique<GStreamerSctpTransportBackend>(WTFMove(transport)) : nullptr);
+-
+-        if (isIceGatheringComplete && *isIceGatheringComplete)
+-            m_peerConnectionBackend.doneGatheringCandidates();
+     }, [protectedThis = Ref(*this), this](const GError* error) {
+         if (protectedThis->isStopped())
+             return;
+@@ -1504,16 +1495,10 @@ void GStreamerMediaEndpoint::onIceCandidate(guint sdpMLineIndex, gchararray cand
+         return;
+ 
+     auto candidateString = makeString(candidate);
+-    if (candidateString.isEmpty()) {
+-        callOnMainThread([protectedThis = Ref(*this), this] {
+-            if (isStopped())
+-                return;
+-            // webrtcbin notifies an empty ICE candidate when gathering is complete.
+-            GST_DEBUG_OBJECT(m_pipeline.get(), "Signaling end-of-candidates");
+-            m_peerConnectionBackend.doneGatheringCandidates();
+-        });
++
++    // webrtcbin notifies an empty ICE candidate when gathering is complete.
++    if (candidateString.isEmpty())
+         return;
+-    }
+ 
+     callOnMainThread([protectedThis = Ref(*this), this, sdp = WTFMove(candidateString), sdpMLineIndex]() mutable {
+         if (isStopped())
+-- 
+2.45.1
+

@@ -1,0 +1,163 @@
+From 4d1937351919a9caf96ba8c58cbda110cfaebea2 Mon Sep 17 00:00:00 2001
+From: Carlos Bentzen <cadubentzen@igalia.com>
+Date: Wed, 5 Jun 2024 08:38:20 -0700
+Subject: [PATCH] [WebRTC] Add debug logging of TransceiverStates
+ https://bugs.webkit.org/show_bug.cgi?id=275146
+
+Reviewed by Philippe Normand.
+
+Add debug logging of TransceiverStates, to aid debugging while moving
+the GStreamer backend out of m_pendingTrackEvents in PeerConnectionBackend.
+
+* Source/WebCore/Modules/mediastream/PeerConnectionBackend.cpp:
+(WebCore::PeerConnectionBackend::setLocalDescriptionSucceeded):
+(WebCore::PeerConnectionBackend::setRemoteDescriptionSucceeded):
+(WebCore::toJSONObject):
+(WebCore::toJSONArray):
+(WebCore::toJSONString):
+(WTF::LogArgument<WebCore::PeerConnectionBackend::TransceiverState>::toString):
+(WTF::LogArgument<WebCore::PeerConnectionBackend::TransceiverStates>::toString):
+* Source/WebCore/Modules/mediastream/PeerConnectionBackend.h:
+(WebCore::PeerConnectionBackend::DescriptionStates::isolatedCopy):
+* Source/WebCore/platform/mediastream/RTCRtpTransceiverDirection.h:
+
+Canonical link: https://commits.webkit.org/279742@main
+---
+ .../mediastream/PeerConnectionBackend.cpp     | 54 ++++++++++++++++++-
+ .../mediastream/PeerConnectionBackend.h       | 18 ++++++-
+ .../mediastream/RTCRtpTransceiverDirection.h  |  4 ++
+ 3 files changed, 74 insertions(+), 2 deletions(-)
+
+diff --git a/Source/WebCore/Modules/mediastream/PeerConnectionBackend.cpp b/Source/WebCore/Modules/mediastream/PeerConnectionBackend.cpp
+index 2036d1ac90cc..70652a3eecbf 100644
+--- a/Source/WebCore/Modules/mediastream/PeerConnectionBackend.cpp
++++ b/Source/WebCore/Modules/mediastream/PeerConnectionBackend.cpp
+@@ -240,7 +240,8 @@ void PeerConnectionBackend::setLocalDescriptionSucceeded(std::optional<Descripti
+ {
+     ASSERT(isMainThread());
+     ALWAYS_LOG(LOGIDENTIFIER);
+-
++    if (transceiverStates)
++        DEBUG_LOG(LOGIDENTIFIER, "Transceiver states: ", *transceiverStates);
+     ASSERT(m_setDescriptionCallback);
+     m_peerConnection.queueTaskKeepingObjectAlive(m_peerConnection, TaskSource::Networking, [this, callback = WTFMove(m_setDescriptionCallback), descriptionStates = WTFMove(descriptionStates), transceiverStates = WTFMove(transceiverStates), sctpBackend = WTFMove(sctpBackend), maxMessageSize]() mutable {
+         if (m_peerConnection.isClosed())
+@@ -325,6 +326,8 @@ void PeerConnectionBackend::setRemoteDescriptionSucceeded(std::optional<Descript
+ {
+     ASSERT(isMainThread());
+     ALWAYS_LOG(LOGIDENTIFIER, "Set remote description succeeded");
++    if (transceiverStates)
++        DEBUG_LOG(LOGIDENTIFIER, "Transceiver states: ", *transceiverStates);
+     ASSERT(m_setDescriptionCallback);
+ 
+     m_peerConnection.queueTaskKeepingObjectAlive(m_peerConnection, TaskSource::Networking, [this, callback = WTFMove(m_setDescriptionCallback), descriptionStates = WTFMove(descriptionStates), transceiverStates = WTFMove(transceiverStates), sctpBackend = WTFMove(sctpBackend), maxMessageSize, events = WTFMove(m_pendingTrackEvents)]() mutable {
+@@ -653,6 +656,55 @@ WTFLogChannel& PeerConnectionBackend::logChannel() const
+ }
+ #endif
+ 
++static Ref<JSON::Object> toJSONObject(const PeerConnectionBackend::TransceiverState& transceiverState)
++{
++    auto object = JSON::Object::create();
++    object->setString("mid"_s, transceiverState.mid);
++
++    auto receiverStreams = JSON::Array::create();
++    for (auto receiverStream : transceiverState.receiverStreams)
++        receiverStreams->pushString(receiverStream->id());
++    object->setArray("receiverStreams"_s, WTFMove(receiverStreams));
++
++    if (auto firedDirection = transceiverState.firedDirection)
++        object->setString("firedDirection"_s, convertEnumerationToString(*firedDirection));
++
++    return object;
++}
++
++static Ref<JSON::Array> toJSONArray(const PeerConnectionBackend::TransceiverStates& transceiverStates)
++{
++    auto array = JSON::Array::create();
++    for (auto transceiverState : transceiverStates)
++        array->pushObject(toJSONObject(transceiverState));
++
++    return array;
++}
++
++static String toJSONString(const PeerConnectionBackend::TransceiverState& transceiverState)
++{
++    return toJSONObject(transceiverState)->toJSONString();
++}
++
++static String toJSONString(const PeerConnectionBackend::TransceiverStates& transceiverStates)
++{
++    return toJSONArray(transceiverStates)->toJSONString();
++}
++
+ } // namespace WebCore
+ 
++namespace WTF {
++
++String LogArgument<WebCore::PeerConnectionBackend::TransceiverState>::toString(const WebCore::PeerConnectionBackend::TransceiverState& transceiverState)
++{
++    return toJSONString(transceiverState);
++}
++
++String LogArgument<WebCore::PeerConnectionBackend::TransceiverStates>::toString(const WebCore::PeerConnectionBackend::TransceiverStates& transceiverStates)
++{
++    return toJSONString(transceiverStates);
++}
++
++}
++
+ #endif // ENABLE(WEB_RTC)
+diff --git a/Source/WebCore/Modules/mediastream/PeerConnectionBackend.h b/Source/WebCore/Modules/mediastream/PeerConnectionBackend.h
+index 97190340d455..7d2df37c11a5 100644
+--- a/Source/WebCore/Modules/mediastream/PeerConnectionBackend.h
++++ b/Source/WebCore/Modules/mediastream/PeerConnectionBackend.h
+@@ -291,7 +291,23 @@ inline PeerConnectionBackend::DescriptionStates PeerConnectionBackend::Descripti
+         WTFMove(pendingRemoteDescriptionSdp).isolatedCopy()
+     };
+ }
+-
+ } // namespace WebCore
+ 
++namespace WTF {
++
++template<typename>
++struct LogArgument;
++
++template <>
++struct LogArgument<WebCore::PeerConnectionBackend::TransceiverState> {
++    static String toString(const WebCore::PeerConnectionBackend::TransceiverState&);
++};
++
++template <>
++struct LogArgument<WebCore::PeerConnectionBackend::TransceiverStates> {
++    static String toString(const WebCore::PeerConnectionBackend::TransceiverStates&);
++};
++
++}
++
+ #endif // ENABLE(WEB_RTC)
+diff --git a/Source/WebCore/platform/mediastream/RTCRtpTransceiverDirection.h b/Source/WebCore/platform/mediastream/RTCRtpTransceiverDirection.h
+index 7c0d67db592a..15d7136bdc13 100644
+--- a/Source/WebCore/platform/mediastream/RTCRtpTransceiverDirection.h
++++ b/Source/WebCore/platform/mediastream/RTCRtpTransceiverDirection.h
+@@ -27,6 +27,8 @@
+ 
+ #if ENABLE(WEB_RTC)
+ 
++#include <wtf/text/WTFString.h>
++
+ namespace WebCore {
+ 
+ enum class RTCRtpTransceiverDirection {
+@@ -36,6 +38,8 @@ enum class RTCRtpTransceiverDirection {
+     Inactive
+ };
+ 
++String convertEnumerationToString(RTCRtpTransceiverDirection); // in JSRTCRtpTransceiverDirection.h
++
+ } // namespace WebCore
+ 
+ #endif
+-- 
+2.45.1
+

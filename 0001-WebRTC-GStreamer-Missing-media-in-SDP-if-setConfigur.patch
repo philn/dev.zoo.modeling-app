@@ -1,0 +1,119 @@
+From 1bc81c31ff6c5f2b535b70b44de1ebc5e0389725 Mon Sep 17 00:00:00 2001
+From: Carlos Bentzen <cadubentzen@igalia.com>
+Date: Mon, 29 Apr 2024 01:53:02 -0700
+Subject: [PATCH] [WebRTC][GStreamer] Missing media in SDP if
+ setConfiguration() is called after createDataChannel() or addTransceiver()
+ https://bugs.webkit.org/show_bug.cgi?id=273318
+
+Reviewed by Xabier Rodriguez-Calvar.
+
+GStreamerMediaEndpoint::setConfiguration() was tearing down the pipeline
+if one already existed and creating a new one, which is an issue if any data channels
+or transceivers are created before RTCPeerConnection.setConfiguration().
+
+The issue is fixed by creating the pipeline earlier in GStreamerMediaEndpoint's contructor,
+so that data channels or transceivers aren't discarded if created/added before setConfiguration().
+
+Credit to Philippe Normand <philn@igalia.com> for finding the issue and fixing it.
+I wrote the layout test, which fails without his fix.
+
+* LayoutTests/webrtc/setConfiguration-after-createDataChannel-or-addTransceiver-expected.txt: Added.
+* LayoutTests/webrtc/setConfiguration-after-createDataChannel-or-addTransceiver.html: Added.
+* Source/WebCore/Modules/mediastream/gstreamer/GStreamerMediaEndpoint.cpp:
+(WebCore::GStreamerMediaEndpoint::GStreamerMediaEndpoint):
+(WebCore::GStreamerMediaEndpoint::setConfiguration):
+
+Canonical link: https://commits.webkit.org/278099@main
+---
+ ...DataChannel-or-addTransceiver-expected.txt |  5 +++
+ ...r-createDataChannel-or-addTransceiver.html | 39 +++++++++++++++++++
+ .../gstreamer/GStreamerMediaEndpoint.cpp      |  8 +---
+ 3 files changed, 46 insertions(+), 6 deletions(-)
+ create mode 100644 LayoutTests/webrtc/setConfiguration-after-createDataChannel-or-addTransceiver-expected.txt
+ create mode 100644 LayoutTests/webrtc/setConfiguration-after-createDataChannel-or-addTransceiver.html
+
+diff --git a/LayoutTests/webrtc/setConfiguration-after-createDataChannel-or-addTransceiver-expected.txt b/LayoutTests/webrtc/setConfiguration-after-createDataChannel-or-addTransceiver-expected.txt
+new file mode 100644
+index 000000000000..f5340be2d806
+--- /dev/null
++++ b/LayoutTests/webrtc/setConfiguration-after-createDataChannel-or-addTransceiver-expected.txt
+@@ -0,0 +1,5 @@
++
++PASS setConfiguration after data channel is created
++PASS setConfiguration after video transceiver is added
++PASS setConfiguration after audio transceiver is added
++
+diff --git a/LayoutTests/webrtc/setConfiguration-after-createDataChannel-or-addTransceiver.html b/LayoutTests/webrtc/setConfiguration-after-createDataChannel-or-addTransceiver.html
+new file mode 100644
+index 000000000000..2b099271bbd7
+--- /dev/null
++++ b/LayoutTests/webrtc/setConfiguration-after-createDataChannel-or-addTransceiver.html
+@@ -0,0 +1,39 @@
++<!doctype html>
++<html>
++    <head>
++        <meta charset="utf-8">
++        <title>Testing media fields in SDP when setConfiguration comes after createDataChannel/addTransceiver</title>
++        <script src="../resources/testharness.js"></script>
++        <script src="../resources/testharnessreport.js"></script>
++    </head>
++    <body>
++        <script src ="routines.js"></script>
++        <script>
++function testMediaInSDP(addTransceiverOrDataChannel, regex) {
++    return async (test) => {
++        const pc = new RTCPeerConnection();
++        addTransceiverOrDataChannel(pc);
++        pc.setConfiguration({});
++        await pc.setLocalDescription();
++        const sdp = pc.localDescription.sdp;
++        assert_true(regex.test(sdp));
++    }
++}
++
++promise_test(testMediaInSDP(
++        pc => pc.createDataChannel("data-channel"),
++        /\r\nm=application.*webrtc-datachannel\r\n/),
++    'setConfiguration after data channel is created');
++
++promise_test(testMediaInSDP(
++        pc => pc.addTransceiver("video"),
++        /\r\nm=video.*\r\n/),
++    'setConfiguration after video transceiver is added');
++
++promise_test(testMediaInSDP(
++        pc => pc.addTransceiver("audio"),
++        /\r\nm=audio.*\r\n/),
++    'setConfiguration after audio transceiver is added');
++        </script>
++    </body>
++</html>
+diff --git a/Source/WebCore/Modules/mediastream/gstreamer/GStreamerMediaEndpoint.cpp b/Source/WebCore/Modules/mediastream/gstreamer/GStreamerMediaEndpoint.cpp
+index 4f22e9353527..a625364c123e 100644
+--- a/Source/WebCore/Modules/mediastream/gstreamer/GStreamerMediaEndpoint.cpp
++++ b/Source/WebCore/Modules/mediastream/gstreamer/GStreamerMediaEndpoint.cpp
+@@ -80,6 +80,8 @@ GStreamerMediaEndpoint::GStreamerMediaEndpoint(GStreamerPeerConnectionBackend& p
+     std::call_once(debugRegisteredFlag, [] {
+         GST_DEBUG_CATEGORY_INIT(webkit_webrtc_endpoint_debug, "webkitwebrtcendpoint", 0, "WebKit WebRTC end-point");
+     });
++
++    initializePipeline();
+ }
+ 
+ GStreamerMediaEndpoint::~GStreamerMediaEndpoint()
+@@ -244,12 +246,6 @@ void GStreamerMediaEndpoint::disposeElementChain(GstElement* element)
+ 
+ bool GStreamerMediaEndpoint::setConfiguration(MediaEndpointConfiguration& configuration)
+ {
+-    if (m_pipeline)
+-        teardownPipeline();
+-
+-    if (!initializePipeline())
+-        return false;
+-
+     auto bundlePolicy = bundlePolicyFromConfiguration(configuration);
+     auto iceTransportPolicy = iceTransportPolicyFromConfiguration(configuration);
+     g_object_set(m_webrtcBin.get(), "bundle-policy", bundlePolicy, "ice-transport-policy", iceTransportPolicy, nullptr);
+-- 
+2.45.1
+

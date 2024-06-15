@@ -41,6 +41,21 @@ modules:
       # Will ship in 2.44.3
       - type: patch
         path: 0001-GStreamer-WebRTC-Missing-a-msid-in-offer-after-setti.patch
+      # Will ship in 2.44.3
+      - type: patch
+        path: 0001-WebRTC-GStreamer-Missing-media-in-SDP-if-setConfigur.patch
+      # Will ship in 2.44.3
+      - type: patch
+        path: 0001-GStreamer-WebRTC-webrtc-connection-state.html-starte.patch
+      # Will ship in 2.44.3
+      - type: patch
+        path: 0001-m_maxMessageSize-should-be-infinity-instead-of-max-i.patch
+      # Will ship in 2.44.3
+      - type: patch
+        path: 0001-Most-of-WPT-webrtc-RTCSctpTransport-maxMessageSize.h.patch
+      # Will ship in 2.44.3
+      - type: patch
+        path: 0001-WebRTC-Add-debug-logging-of-TransceiverStates.patch
       # Temporary hack:
       - type: patch
         path: 0001-WebKitSettings-Enable-WebRTC-by-default.patch

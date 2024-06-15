@@ -1,0 +1,304 @@
+From a270d67c53417c216ccfa1ed3bbc30a20e7d4512 Mon Sep 17 00:00:00 2001
+From: Youenn Fablet <youenn@apple.com>
+Date: Wed, 22 May 2024 00:05:50 -0700
+Subject: [PATCH] Most of WPT webrtc/RTCSctpTransport-maxMessageSize.html tests
+ are failing https://bugs.webkit.org/show_bug.cgi?id=274442 rdar://128444396
+
+Reviewed by Philippe Normand.
+
+We implement https://w3c.github.io/webrtc-pc/#sctp-transport-update-mms.
+This is called when successfully applying a SDP description as per specification.
+In this implementation, the assumption is that canSendSize is 0.
+The specific value of 65536 is handled by libwebrtc.
+
+* LayoutTests/imported/w3c/web-platform-tests/webrtc/RTCSctpTransport-maxMessageSize-expected.txt:
+* Source/WebCore/Modules/mediastream/PeerConnectionBackend.cpp:
+(WebCore::PeerConnectionBackend::setLocalDescriptionSucceeded):
+(WebCore::PeerConnectionBackend::setRemoteDescriptionSucceeded):
+* Source/WebCore/Modules/mediastream/PeerConnectionBackend.h:
+* Source/WebCore/Modules/mediastream/RTCPeerConnection.cpp:
+(WebCore::RTCPeerConnection::updateSctpBackend):
+* Source/WebCore/Modules/mediastream/RTCPeerConnection.h:
+* Source/WebCore/Modules/mediastream/RTCSctpTransport.cpp:
+(WebCore::RTCSctpTransport::onStateChanged):
+(WebCore::RTCSctpTransport::updateMaxMessageSize):
+* Source/WebCore/Modules/mediastream/RTCSctpTransport.h:
+* Source/WebCore/Modules/mediastream/gstreamer/GStreamerMediaEndpoint.cpp:
+(WebCore::GStreamerMediaEndpoint::doSetLocalDescription):
+(WebCore::GStreamerMediaEndpoint::doSetRemoteDescription):
+* Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCMediaEndpoint.cpp:
+(WebCore::SctpTransportState::maxMessageSize const):
+(WebCore::LibWebRTCMediaEndpoint::setLocalSessionDescriptionSucceeded):
+(WebCore::LibWebRTCMediaEndpoint::setRemoteSessionDescriptionSucceeded):
+
+Canonical link: https://commits.webkit.org/279111@main
+---
+ ...CSctpTransport-maxMessageSize-expected.txt |  6 ++---
+ .../mediastream/PeerConnectionBackend.cpp     | 12 +++++-----
+ .../mediastream/PeerConnectionBackend.h       |  4 ++--
+ .../Modules/mediastream/RTCPeerConnection.cpp | 23 ++++++++++---------
+ .../Modules/mediastream/RTCPeerConnection.h   |  2 +-
+ .../Modules/mediastream/RTCSctpTransport.cpp  |  8 +++++--
+ .../Modules/mediastream/RTCSctpTransport.h    |  7 +++---
+ .../gstreamer/GStreamerMediaEndpoint.cpp      | 20 ++++++++++++++--
+ .../libwebrtc/LibWebRTCMediaEndpoint.cpp      | 10 ++++++--
+ 9 files changed, 59 insertions(+), 33 deletions(-)
+
+diff --git a/Source/WebCore/Modules/mediastream/PeerConnectionBackend.cpp b/Source/WebCore/Modules/mediastream/PeerConnectionBackend.cpp
+index 0ca9dd2a04d6..2036d1ac90cc 100644
+--- a/Source/WebCore/Modules/mediastream/PeerConnectionBackend.cpp
++++ b/Source/WebCore/Modules/mediastream/PeerConnectionBackend.cpp
+@@ -236,18 +236,18 @@ static void processRemoteTracks(RTCRtpTransceiver& transceiver, PeerConnectionBa
+     transceiver.setFiredDirection(state.firedDirection);
+ }
+ 
+-void PeerConnectionBackend::setLocalDescriptionSucceeded(std::optional<DescriptionStates>&& descriptionStates, std::optional<TransceiverStates>&& transceiverStates, std::unique_ptr<RTCSctpTransportBackend>&& sctpBackend)
++void PeerConnectionBackend::setLocalDescriptionSucceeded(std::optional<DescriptionStates>&& descriptionStates, std::optional<TransceiverStates>&& transceiverStates, std::unique_ptr<RTCSctpTransportBackend>&& sctpBackend, std::optional<double> maxMessageSize)
+ {
+     ASSERT(isMainThread());
+     ALWAYS_LOG(LOGIDENTIFIER);
+ 
+     ASSERT(m_setDescriptionCallback);
+-    m_peerConnection.queueTaskKeepingObjectAlive(m_peerConnection, TaskSource::Networking, [this, callback = WTFMove(m_setDescriptionCallback), descriptionStates = WTFMove(descriptionStates), transceiverStates = WTFMove(transceiverStates), sctpBackend = WTFMove(sctpBackend)]() mutable {
++    m_peerConnection.queueTaskKeepingObjectAlive(m_peerConnection, TaskSource::Networking, [this, callback = WTFMove(m_setDescriptionCallback), descriptionStates = WTFMove(descriptionStates), transceiverStates = WTFMove(transceiverStates), sctpBackend = WTFMove(sctpBackend), maxMessageSize]() mutable {
+         if (m_peerConnection.isClosed())
+             return;
+ 
+         m_peerConnection.updateTransceiversAfterSuccessfulLocalDescription();
+-        m_peerConnection.updateSctpBackend(WTFMove(sctpBackend));
++        m_peerConnection.updateSctpBackend(WTFMove(sctpBackend), maxMessageSize);
+ 
+         if (descriptionStates) {
+             m_peerConnection.updateDescriptions(WTFMove(*descriptionStates));
+@@ -321,13 +321,13 @@ void PeerConnectionBackend::setRemoteDescription(const RTCSessionDescription& se
+     doSetRemoteDescription(sessionDescription);
+ }
+ 
+-void PeerConnectionBackend::setRemoteDescriptionSucceeded(std::optional<DescriptionStates>&& descriptionStates, std::optional<TransceiverStates>&& transceiverStates, std::unique_ptr<RTCSctpTransportBackend>&& sctpBackend)
++void PeerConnectionBackend::setRemoteDescriptionSucceeded(std::optional<DescriptionStates>&& descriptionStates, std::optional<TransceiverStates>&& transceiverStates, std::unique_ptr<RTCSctpTransportBackend>&& sctpBackend, std::optional<double> maxMessageSize)
+ {
+     ASSERT(isMainThread());
+     ALWAYS_LOG(LOGIDENTIFIER, "Set remote description succeeded");
+     ASSERT(m_setDescriptionCallback);
+ 
+-    m_peerConnection.queueTaskKeepingObjectAlive(m_peerConnection, TaskSource::Networking, [this, callback = WTFMove(m_setDescriptionCallback), descriptionStates = WTFMove(descriptionStates), transceiverStates = WTFMove(transceiverStates), sctpBackend = WTFMove(sctpBackend), events = WTFMove(m_pendingTrackEvents)]() mutable {
++    m_peerConnection.queueTaskKeepingObjectAlive(m_peerConnection, TaskSource::Networking, [this, callback = WTFMove(m_setDescriptionCallback), descriptionStates = WTFMove(descriptionStates), transceiverStates = WTFMove(transceiverStates), sctpBackend = WTFMove(sctpBackend), maxMessageSize, events = WTFMove(m_pendingTrackEvents)]() mutable {
+         if (m_peerConnection.isClosed())
+             return;
+ 
+@@ -344,7 +344,7 @@ void PeerConnectionBackend::setRemoteDescriptionSucceeded(std::optional<Descript
+         }
+ 
+         m_peerConnection.updateTransceiversAfterSuccessfulRemoteDescription();
+-        m_peerConnection.updateSctpBackend(WTFMove(sctpBackend));
++        m_peerConnection.updateSctpBackend(WTFMove(sctpBackend), maxMessageSize);
+ 
+         if (descriptionStates) {
+             m_peerConnection.updateDescriptions(WTFMove(*descriptionStates));
+diff --git a/Source/WebCore/Modules/mediastream/PeerConnectionBackend.h b/Source/WebCore/Modules/mediastream/PeerConnectionBackend.h
+index 58c28e4b1bb6..97190340d455 100644
+--- a/Source/WebCore/Modules/mediastream/PeerConnectionBackend.h
++++ b/Source/WebCore/Modules/mediastream/PeerConnectionBackend.h
+@@ -232,10 +232,10 @@ protected:
+     void createAnswerSucceeded(String&&);
+     void createAnswerFailed(Exception&&);
+ 
+-    void setLocalDescriptionSucceeded(std::optional<DescriptionStates>&&, std::optional<TransceiverStates>&&, std::unique_ptr<RTCSctpTransportBackend>&&);
++    void setLocalDescriptionSucceeded(std::optional<DescriptionStates>&&, std::optional<TransceiverStates>&&, std::unique_ptr<RTCSctpTransportBackend>&&, std::optional<double>);
+     void setLocalDescriptionFailed(Exception&&);
+ 
+-    void setRemoteDescriptionSucceeded(std::optional<DescriptionStates>&&, std::optional<TransceiverStates>&&, std::unique_ptr<RTCSctpTransportBackend>&&);
++    void setRemoteDescriptionSucceeded(std::optional<DescriptionStates>&&, std::optional<TransceiverStates>&&, std::unique_ptr<RTCSctpTransportBackend>&&, std::optional<double>);
+     void setRemoteDescriptionFailed(Exception&&);
+ 
+     void validateSDP(const String&) const;
+diff --git a/Source/WebCore/Modules/mediastream/RTCPeerConnection.cpp b/Source/WebCore/Modules/mediastream/RTCPeerConnection.cpp
+index 70042880dbe4..22cb0b57d3e5 100644
+--- a/Source/WebCore/Modules/mediastream/RTCPeerConnection.cpp
++++ b/Source/WebCore/Modules/mediastream/RTCPeerConnection.cpp
+@@ -1058,24 +1058,25 @@ void RTCPeerConnection::updateTransceiversAfterSuccessfulRemoteDescription()
+     updateTransceiverTransports();
+ }
+ 
+-void RTCPeerConnection::updateSctpBackend(std::unique_ptr<RTCSctpTransportBackend>&& sctpBackend)
++void RTCPeerConnection::updateSctpBackend(std::unique_ptr<RTCSctpTransportBackend>&& sctpBackend, std::optional<double> maxMessageSize)
+ {
+     if (!sctpBackend) {
+         m_sctpTransport = nullptr;
+         return;
+     }
+-    if (m_sctpTransport && m_sctpTransport->backend() == *sctpBackend) {
+-        m_sctpTransport->update();
+-        return;
++
++    if (!m_sctpTransport || m_sctpTransport->backend() != *sctpBackend) {
++        RefPtr context = scriptExecutionContext();
++        if (!context)
++            return;
++
++        auto dtlsTransport = getOrCreateDtlsTransport(sctpBackend->dtlsTransportBackend().moveToUniquePtr());
++        if (!dtlsTransport)
++            return;
++        m_sctpTransport = RTCSctpTransport::create(*context, makeUniqueRefFromNonNullUniquePtr(WTFMove(sctpBackend)), dtlsTransport.releaseNonNull());
+     }
+-    RefPtr context = scriptExecutionContext();
+-    if (!context)
+-        return;
+ 
+-    auto dtlsTransport = getOrCreateDtlsTransport(sctpBackend->dtlsTransportBackend().moveToUniquePtr());
+-    if (!dtlsTransport)
+-        return;
+-    m_sctpTransport = RTCSctpTransport::create(*context, makeUniqueRefFromNonNullUniquePtr(WTFMove(sctpBackend)), dtlsTransport.releaseNonNull());
++    m_sctpTransport->updateMaxMessageSize(maxMessageSize);
+ }
+ 
+ #if !RELEASE_LOG_DISABLED
+diff --git a/Source/WebCore/Modules/mediastream/RTCPeerConnection.h b/Source/WebCore/Modules/mediastream/RTCPeerConnection.h
+index 6106b8e071fa..640f6ddfe29b 100644
+--- a/Source/WebCore/Modules/mediastream/RTCPeerConnection.h
++++ b/Source/WebCore/Modules/mediastream/RTCPeerConnection.h
+@@ -192,7 +192,7 @@ public:
+     void updateDescriptions(PeerConnectionBackend::DescriptionStates&&);
+     void updateTransceiversAfterSuccessfulLocalDescription();
+     void updateTransceiversAfterSuccessfulRemoteDescription();
+-    void updateSctpBackend(std::unique_ptr<RTCSctpTransportBackend>&&);
++    void updateSctpBackend(std::unique_ptr<RTCSctpTransportBackend>&&, std::optional<double>);
+ 
+     void processIceTransportStateChange(RTCIceTransport&);
+     void processIceTransportChanges();
+diff --git a/Source/WebCore/Modules/mediastream/RTCSctpTransport.cpp b/Source/WebCore/Modules/mediastream/RTCSctpTransport.cpp
+index bf7745a1c60b..eb7f7590af9d 100644
+--- a/Source/WebCore/Modules/mediastream/RTCSctpTransport.cpp
++++ b/Source/WebCore/Modules/mediastream/RTCSctpTransport.cpp
+@@ -75,8 +75,7 @@ void RTCSctpTransport::onStateChanged(RTCSctpTransportState state, std::optional
+         if (m_state == RTCSctpTransportState::Closed)
+             return;
+ 
+-        if (maxMessageSize)
+-            m_maxMessageSize = *maxMessageSize;
++        m_maxMessageSize = maxMessageSize;
+         if (maxChannels)
+             m_maxChannels = *maxChannels;
+ 
+@@ -87,6 +86,11 @@ void RTCSctpTransport::onStateChanged(RTCSctpTransportState state, std::optional
+     });
+ }
+ 
++void RTCSctpTransport::updateMaxMessageSize(std::optional<double> maxMessageSize)
++{
++    m_maxMessageSize = maxMessageSize;
++}
++
+ } // namespace WebCore
+ 
+ #endif // ENABLE(WEB_RTC)
+diff --git a/Source/WebCore/Modules/mediastream/RTCSctpTransport.h b/Source/WebCore/Modules/mediastream/RTCSctpTransport.h
+index c4f1e85bef58..cd71b634c2a3 100644
+--- a/Source/WebCore/Modules/mediastream/RTCSctpTransport.h
++++ b/Source/WebCore/Modules/mediastream/RTCSctpTransport.h
+@@ -47,10 +47,10 @@ public:
+ 
+     RTCDtlsTransport& transport() { return m_transport.get(); }
+     RTCSctpTransportState state() const { return m_state; }
+-    double maxMessageSize() const { return m_maxMessageSize; }
++    double maxMessageSize() const { return m_maxMessageSize.value_or(std::numeric_limits<double>::infinity()); }
+     std::optional<unsigned short>  maxChannels() const { return m_maxChannels; }
+ 
+-    void update() { }
++    void updateMaxMessageSize(std::optional<double>);
+ 
+     const RTCSctpTransportBackend& backend() const { return m_backend.get(); }
+ 
+@@ -73,8 +73,7 @@ private:
+     UniqueRef<RTCSctpTransportBackend> m_backend;
+     Ref<RTCDtlsTransport> m_transport;
+     RTCSctpTransportState m_state { RTCSctpTransportState::Connecting };
+-    // https://w3c.github.io/webrtc-pc/#dfn-update-the-data-max-message-size
+-    double m_maxMessageSize { std::numeric_limits<double>::infinity() };
++    std::optional<double> m_maxMessageSize;
+     std::optional<unsigned short> m_maxChannels;
+ };
+ 
+diff --git a/Source/WebCore/Modules/mediastream/gstreamer/GStreamerMediaEndpoint.cpp b/Source/WebCore/Modules/mediastream/gstreamer/GStreamerMediaEndpoint.cpp
+index 717831b0de21..9d33c053b5e0 100644
+--- a/Source/WebCore/Modules/mediastream/gstreamer/GStreamerMediaEndpoint.cpp
++++ b/Source/WebCore/Modules/mediastream/gstreamer/GStreamerMediaEndpoint.cpp
+@@ -461,7 +461,15 @@ void GStreamerMediaEndpoint::doSetLocalDescription(const RTCSessionDescription*
+ 
+         GRefPtr<GstWebRTCSCTPTransport> transport;
+         g_object_get(m_webrtcBin.get(), "sctp-transport", &transport.outPtr(), nullptr);
+-        m_peerConnectionBackend.setLocalDescriptionSucceeded(WTFMove(descriptions), { }, transport ? makeUnique<GStreamerSctpTransportBackend>(WTFMove(transport)) : nullptr);
++
++        std::optional<double> maxMessageSize;
++        if (transport) {
++            uint64_t maxMessageSizeValue;
++            g_object_get(transport.get(), "max-message-size", &maxMessageSizeValue, nullptr);
++            maxMessageSize = static_cast<double>(maxMessageSizeValue);
++        }
++
++        m_peerConnectionBackend.setLocalDescriptionSucceeded(WTFMove(descriptions), { }, transport ? makeUnique<GStreamerSctpTransportBackend>(WTFMove(transport)) : nullptr, maxMessageSize);
+     }, [protectedThis = Ref(*this), this](const GError* error) {
+         if (protectedThis->isStopped())
+             return;
+@@ -535,7 +543,15 @@ void GStreamerMediaEndpoint::doSetRemoteDescription(const RTCSessionDescription&
+ 
+         GRefPtr<GstWebRTCSCTPTransport> transport;
+         g_object_get(m_webrtcBin.get(), "sctp-transport", &transport.outPtr(), nullptr);
+-        m_peerConnectionBackend.setRemoteDescriptionSucceeded(WTFMove(descriptions), { }, transport ? makeUnique<GStreamerSctpTransportBackend>(WTFMove(transport)) : nullptr);
++
++        std::optional<double> maxMessageSize;
++        if (transport) {
++            uint64_t maxMessageSizeValue;
++            g_object_get(transport.get(), "max-message-size", &maxMessageSizeValue, nullptr);
++            maxMessageSize = static_cast<double>(maxMessageSizeValue);
++        }
++
++        m_peerConnectionBackend.setRemoteDescriptionSucceeded(WTFMove(descriptions), { }, transport ? makeUnique<GStreamerSctpTransportBackend>(WTFMove(transport)) : nullptr, maxMessageSize);
+     }, [protectedThis = Ref(*this), this](const GError* error) {
+         if (protectedThis->isStopped())
+             return;
+diff --git a/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCMediaEndpoint.cpp b/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCMediaEndpoint.cpp
+index 1a6a76f3aa1b..9294948c7cc2 100644
+--- a/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCMediaEndpoint.cpp
++++ b/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCMediaEndpoint.cpp
+@@ -658,6 +658,7 @@ class SctpTransportState {
+ public:
+     explicit SctpTransportState(rtc::scoped_refptr<webrtc::SctpTransportInterface>&&);
+     std::unique_ptr<LibWebRTCSctpTransportBackend> createBackend();
++    std::optional<double> maxMessageSize() const;
+ 
+ private:
+     rtc::scoped_refptr<webrtc::SctpTransportInterface> m_transport;
+@@ -678,6 +679,11 @@ std::unique_ptr<LibWebRTCSctpTransportBackend> SctpTransportState::createBackend
+     return makeUnique<LibWebRTCSctpTransportBackend>(WTFMove(m_transport), m_information.dtls_transport());
+ }
+ 
++std::optional<double> SctpTransportState::maxMessageSize() const
++{
++    return m_information.MaxMessageSize() ? std::make_optional(*m_information.MaxMessageSize()) : std::nullopt;
++}
++
+ struct LibWebRTCMediaEndpointTransceiverState {
+     String mid;
+     Vector<String> receiverStreamIds;
+@@ -735,7 +741,7 @@ void LibWebRTCMediaEndpoint::setLocalSessionDescriptionSucceeded()
+             });
+             return { WTFMove(state.mid), WTFMove(streams), state.firedDirection };
+         });
+-        protectedThis->m_peerConnectionBackend.setLocalDescriptionSucceeded(WTFMove(descriptions), WTFMove(transceiverStates), sctpState.createBackend());
++        protectedThis->m_peerConnectionBackend.setLocalDescriptionSucceeded(WTFMove(descriptions), WTFMove(transceiverStates), sctpState.createBackend(), sctpState.maxMessageSize());
+     });
+ }
+ 
+@@ -762,7 +768,7 @@ void LibWebRTCMediaEndpoint::setRemoteSessionDescriptionSucceeded()
+             });
+             return { WTFMove(state.mid), WTFMove(streams), state.firedDirection };
+         });
+-        protectedThis->m_peerConnectionBackend.setRemoteDescriptionSucceeded(WTFMove(descriptions), WTFMove(transceiverStates), sctpState.createBackend());
++        protectedThis->m_peerConnectionBackend.setRemoteDescriptionSucceeded(WTFMove(descriptions), WTFMove(transceiverStates), sctpState.createBackend(), sctpState.maxMessageSize());
+     });
+ }
+ 
+-- 
+2.45.1
+
