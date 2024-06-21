@@ -1,0 +1,827 @@
+From c86d077428328e85d0ea43212bdf15a5c0bc0302 Mon Sep 17 00:00:00 2001
+From: Carlos Bentzen <cadubentzen@igalia.com>
+Date: Fri, 21 Jun 2024 12:37:06 +0200
+Subject: [PATCH] [GStreamer][WebRTC] Emit 'track' event before
+ setRemoteDescription resolves https://bugs.webkit.org/show_bug.cgi?id=275685
+
+Reviewed by NOBODY (OOPS!).
+
+The track event should be emitted after sucessfully applying a remote
+description and before the promise from setRemoteDescription is resolved.
+However, up until now the GstWebRTC backend emitted the event based on
+the 'pad-added' signal. The timing of the signal doesn't match what the
+spec expects.
+
+Fix the issue by querying the transceiver states after applying a remote
+description sucessfully. By providing the transceiver states to
+PeerConnectionBackend::setRemoteDescriptionSucceeded(), it's able to
+emit the track events correctly acccording to the spec.
+
+In order to correctly get the transceiver states from webrtcbin, some
+issues with the element were found. Most of those issues could be worked
+around in WebKit but some issues are still exposed by this change and
+require fixes in GStreamer:
+
+https://gitlab.freedesktop.org/gstreamer/gstreamer/-/issues/3641
+
+A test is added to check that the track event is emitted before
+setRemoteDescription resolves, which would fail before this patch in
+the GstWebRTC backend.
+
+* LayoutTests/platform/glib/TestExpectations:
+* LayoutTests/webrtc/setRemoteDescription-track-expected.txt: Added.
+* LayoutTests/webrtc/setRemoteDescription-track.html: Added.
+* Source/WebCore/Modules/mediastream/PeerConnectionBackend.cpp:
+(WebCore::PeerConnectionBackend::setRemoteDescriptionSucceeded):
+(WebCore::PeerConnectionBackend::setRemoteDescriptionFailed):
+(WebCore::PeerConnectionBackend::stop):
+(WebCore::PeerConnectionBackend::dispatchTrackEvent): Deleted.
+(WebCore::PeerConnectionBackend::addPendingTrackEvent): Deleted.
+* Source/WebCore/Modules/mediastream/PeerConnectionBackend.h:
+* Source/WebCore/Modules/mediastream/gstreamer/GStreamerMediaEndpoint.cpp:
+(WebCore::GStreamerMediaEndpoint::initializePipeline):
+(WebCore::GStreamerMediaEndpointTransceiverState::isolatedCopy):
+(WebCore::getMediaStreamIdsFromSDPMedia):
+(WebCore::isRecvDirection):
+(WebCore::toGStreamerMediaEndpointTransceiverState):
+(WebCore::transceiverStatesFromWebRTCBin):
+(WebCore::GStreamerMediaEndpoint::doSetLocalDescription):
+(WebCore::GStreamerMediaEndpoint::setTransceiverCodecPreferences):
+(WebCore::GStreamerMediaEndpoint::doSetRemoteDescription):
+(WebCore::GStreamerMediaEndpoint::setDescription):
+(WebCore::GStreamerMediaEndpoint::connectIncomingTrack):
+(WebCore::GStreamerMediaEndpoint::collectTransceivers):
+* Source/WebCore/Modules/mediastream/gstreamer/GStreamerMediaEndpoint.h:
+* Source/WebCore/Modules/mediastream/gstreamer/GStreamerPeerConnectionBackend.cpp:
+(WebCore::GStreamerPeerConnectionBackend::addPendingTrackEvent): Deleted.
+(WebCore::GStreamerPeerConnectionBackend::dispatchPendingTrackEvents): Deleted.
+* Source/WebCore/Modules/mediastream/gstreamer/GStreamerPeerConnectionBackend.h:
+* Source/WebCore/Modules/mediastream/gstreamer/GStreamerRtpTransceiverBackend.cpp:
+(WebCore::GStreamerRtpTransceiverBackend::setMidFromSDP):
+(WebCore::GStreamerRtpTransceiverBackend::mid):
+* Source/WebCore/Modules/mediastream/gstreamer/GStreamerRtpTransceiverBackend.h:
+* Source/WebCore/platform/mediastream/MediaStreamTrackPrivate.cpp:
+(WebCore::MediaStreamTrackPrivate::dataFlowStarted):
+* Source/WebCore/platform/mediastream/MediaStreamTrackPrivate.h:
+(WebCore::MediaStreamTrackPrivateObserver::dataFlowStarted):
+* Source/WebCore/platform/mediastream/gstreamer/GStreamerMediaStreamSource.cpp:
+(webkitMediaStreamSrcCharacteristicsChanged):
+---
+ LayoutTests/platform/glib/TestExpectations    |  12 +-
+ .../setRemoteDescription-track-expected.txt   |   3 +
+ .../webrtc/setRemoteDescription-track.html    |  33 +++
+ .../mediastream/PeerConnectionBackend.cpp     |  31 +--
+ .../mediastream/PeerConnectionBackend.h       |  12 -
+ .../gstreamer/GStreamerMediaEndpoint.cpp      | 246 +++++++++++++++---
+ .../gstreamer/GStreamerMediaEndpoint.h        |   2 +
+ .../GStreamerPeerConnectionBackend.cpp        |  14 -
+ .../GStreamerPeerConnectionBackend.h          |   4 -
+ .../GStreamerRtpTransceiverBackend.cpp        |  12 +
+ .../GStreamerRtpTransceiverBackend.h          |   3 +
+ .../mediastream/MediaStreamTrackPrivate.cpp   |   7 +
+ .../mediastream/MediaStreamTrackPrivate.h     |   5 +-
+ .../gstreamer/GStreamerMediaStreamSource.cpp  |  18 +-
+ 14 files changed, 295 insertions(+), 107 deletions(-)
+ create mode 100644 LayoutTests/webrtc/setRemoteDescription-track-expected.txt
+ create mode 100644 LayoutTests/webrtc/setRemoteDescription-track.html
+
+diff --git a/LayoutTests/platform/glib/TestExpectations b/LayoutTests/platform/glib/TestExpectations
+index b195b9b933fb..083aefbd3825 100644
+--- a/LayoutTests/platform/glib/TestExpectations
++++ b/LayoutTests/platform/glib/TestExpectations
+@@ -2001,7 +2001,7 @@ webkit.org/b/235885 imported/w3c/web-platform-tests/webrtc-extensions/RTCRtpPara
+ webkit.org/b/235885 imported/w3c/web-platform-tests/webrtc-priority/RTCRtpParameters-encodings.html [ Failure ]
+ webkit.org/b/235885 imported/w3c/web-platform-tests/mst-content-hint/RTCRtpSendParameters-degradationPreference.html [ Failure ]
+ webkit.org/b/235885 webrtc/addTransceiver-then-addTrack.html [ Failure ]
+-webkit.org/b/235885 webrtc/audio-video-element-playing.html [ Timeout ]
++webkit.org/b/235885 webrtc/audio-video-element-playing.html [ Failure ]
+ webkit.org/b/235885 webrtc/ephemeral-certificates-and-cnames.html [ Failure ]
+ webkit.org/b/235885 webrtc/filtering-ice-candidate-after-reload.html [ Failure ]
+ webkit.org/b/235885 webrtc/peer-connection-track-end.html [ Failure ]
+@@ -2092,6 +2092,14 @@ webkit.org/b/151344 fast/mediastream/MediaStream-add-ended-tracks.html [ Skip ]
+ # Flakes moved from wpe/TestExpectations -- if they're flaky in WPE they're very likely to be flaky in GTK
+ http/tests/webrtc/muted-video-mediastream-invisible-autoplay.html [ Failure Timeout Pass ]
+ 
++# webrtcbin doesn't emit "outbound-rtp" stats until it's in connected state
++webrtc/audio-muted-stats.html [ Failure ]
++
++# Transceivers in webrtcbin aren't associated after applying remote description, thus the track event
++# is never emitted and the test fails.
++# https://gitlab.freedesktop.org/gstreamer/gstreamer/-/issues/3641
++webrtc/video-getParameters.html [ Failure ]
++
+ #////////////////////////////////////////////////////////////////////////////////////////
+ # End of WebRTC-related bugs
+ #////////////////////////////////////////////////////////////////////////////////////////
+@@ -3553,7 +3561,7 @@ webkit.org/b/252878 imported/w3c/web-platform-tests/wasm/webapi/instantiateStrea
+ webkit.org/b/252878 imported/w3c/web-platform-tests/wasm/webapi/instantiateStreaming.any.sharedworker.html [ Failure Pass ]
+ webkit.org/b/252878 loader/navigation-policy/should-open-external-urls/subframe-navigated-programatically-by-main-frame.html [ Failure Pass ]
+ webkit.org/b/252878 webrtc/multi-video.html [ Failure Pass Timeout ]
+-webkit.org/b/252878 webrtc/peer-connection-remote-audio-mute2.html [ Pass Timeout ]
++webkit.org/b/252878 webrtc/peer-connection-remote-audio-mute2.html [ Pass Failure ]
+ 
+ # Missing support for UIScriptController.paste()
+ fast/forms/input-text-max-length-emojis.html [ Failure ]
+diff --git a/LayoutTests/webrtc/setRemoteDescription-track-expected.txt b/LayoutTests/webrtc/setRemoteDescription-track-expected.txt
+new file mode 100644
+index 000000000000..7c053f599c2d
+--- /dev/null
++++ b/LayoutTests/webrtc/setRemoteDescription-track-expected.txt
+@@ -0,0 +1,3 @@
++
++PASS Track event is emitted before setRemoteDescription resolves
++
+diff --git a/LayoutTests/webrtc/setRemoteDescription-track.html b/LayoutTests/webrtc/setRemoteDescription-track.html
+new file mode 100644
+index 000000000000..8bb7da162ad8
+--- /dev/null
++++ b/LayoutTests/webrtc/setRemoteDescription-track.html
+@@ -0,0 +1,33 @@
++<!doctype html>
++<html>
++    <head>
++        <meta charset="utf-8">
++        <title>Setting remote description and track event</title>
++        <script src="../resources/testharness.js"></script>
++        <script src="../resources/testharnessreport.js"></script>
++    </head>
++    <body>
++        <script>
++
++promise_test(async (test) => {
++    const localStream = await navigator.mediaDevices.getUserMedia({video:true });
++
++    const pc1 = new RTCPeerConnection();
++    const pc2 = new RTCPeerConnection();
++
++    let orderingOfEvents = ""
++
++    pc1.addTrack(localStream.getVideoTracks()[0], localStream);
++    pc2.ontrack = () => { orderingOfEvents += "track;" };
++
++    const offer = await pc1.createOffer();
++    await pc1.setLocalDescription(offer);
++    orderingOfEvents += "before;";
++    await pc2.setRemoteDescription(offer);
++    orderingOfEvents += "after;";
++
++    assert_equals(orderingOfEvents, "before;track;after;");
++}, "Track event is emitted before setRemoteDescription resolves");
++        </script>
++    </body>
++</html>
+diff --git a/Source/WebCore/Modules/mediastream/PeerConnectionBackend.cpp b/Source/WebCore/Modules/mediastream/PeerConnectionBackend.cpp
+index 813d6ed366c8..b944136be4c3 100644
+--- a/Source/WebCore/Modules/mediastream/PeerConnectionBackend.cpp
++++ b/Source/WebCore/Modules/mediastream/PeerConnectionBackend.cpp
+@@ -327,7 +327,7 @@ void PeerConnectionBackend::setRemoteDescriptionSucceeded(std::optional<Descript
+     ALWAYS_LOG(LOGIDENTIFIER, "Set remote description succeeded");
+     ASSERT(m_setDescriptionCallback);
+ 
+-    m_peerConnection.queueTaskKeepingObjectAlive(m_peerConnection, TaskSource::Networking, [this, callback = WTFMove(m_setDescriptionCallback), descriptionStates = WTFMove(descriptionStates), transceiverStates = WTFMove(transceiverStates), sctpBackend = WTFMove(sctpBackend), events = WTFMove(m_pendingTrackEvents)]() mutable {
++    m_peerConnection.queueTaskKeepingObjectAlive(m_peerConnection, TaskSource::Networking, [this, callback = WTFMove(m_setDescriptionCallback), descriptionStates = WTFMove(descriptionStates), transceiverStates = WTFMove(transceiverStates), sctpBackend = WTFMove(sctpBackend)]() mutable {
+         if (m_peerConnection.isClosed())
+             return;
+ 
+@@ -401,38 +401,17 @@ void PeerConnectionBackend::setRemoteDescriptionSucceeded(std::optional<Descript
+ 
+                 track->source().setMuted(false);
+             }
+-        } else {
+-            // FIXME: Move ports out of m_pendingTrackEvents.
+-            for (auto& event : events)
+-                dispatchTrackEvent(event);
+         }
+ 
+         callback({ });
+     });
+ }
+ 
+-void PeerConnectionBackend::dispatchTrackEvent(PendingTrackEvent& event)
+-{
+-    auto& track = event.track.get();
+-
+-    m_peerConnection.dispatchEvent(RTCTrackEvent::create(eventNames().trackEvent, Event::CanBubble::No, Event::IsCancelable::No, WTFMove(event.receiver), WTFMove(event.track), WTFMove(event.streams), WTFMove(event.transceiver)));
+-    ALWAYS_LOG(LOGIDENTIFIER, "Dispatched if feasible track of type ", track.source().type());
+-
+-    if (m_peerConnection.isClosed())
+-        return;
+-
+-    // FIXME: As per spec, we should set muted to 'false' when starting to receive the content from network.
+-    track.source().setMuted(false);
+-}
+-
+ void PeerConnectionBackend::setRemoteDescriptionFailed(Exception&& exception)
+ {
+     ASSERT(isMainThread());
+     ALWAYS_LOG(LOGIDENTIFIER, "Set remote description failed:", exception.message());
+ 
+-    ASSERT(m_pendingTrackEvents.isEmpty());
+-    m_pendingTrackEvents.clear();
+-
+     ASSERT(m_setDescriptionCallback);
+     m_peerConnection.queueTaskKeepingObjectAlive(m_peerConnection, TaskSource::Networking, [this, callback = WTFMove(m_setDescriptionCallback), exception = WTFMove(exception)]() mutable {
+         if (m_peerConnection.isClosed())
+@@ -453,12 +432,6 @@ void PeerConnectionBackend::iceGatheringStateChanged(RTCIceGatheringState state)
+     });
+ }
+ 
+-void PeerConnectionBackend::addPendingTrackEvent(PendingTrackEvent&& event)
+-{
+-    ASSERT(!m_peerConnection.isStopped());
+-    m_pendingTrackEvents.append(WTFMove(event));
+-}
+-
+ static String extractIPAddress(StringView sdp)
+ {
+     unsigned counter = 0;
+@@ -590,8 +563,6 @@ void PeerConnectionBackend::stop()
+     m_offerAnswerCallback = nullptr;
+     m_setDescriptionCallback = nullptr;
+ 
+-    m_pendingTrackEvents.clear();
+-
+     doStop();
+ }
+ 
+diff --git a/Source/WebCore/Modules/mediastream/PeerConnectionBackend.h b/Source/WebCore/Modules/mediastream/PeerConnectionBackend.h
+index e9604852a54b..529a0f31c914 100644
+--- a/Source/WebCore/Modules/mediastream/PeerConnectionBackend.h
++++ b/Source/WebCore/Modules/mediastream/PeerConnectionBackend.h
+@@ -228,16 +228,6 @@ protected:
+ 
+     void validateSDP(const String&) const;
+ 
+-    struct PendingTrackEvent {
+-        Ref<RTCRtpReceiver> receiver;
+-        Ref<MediaStreamTrack> track;
+-        Vector<RefPtr<MediaStream>> streams;
+-        RefPtr<RTCRtpTransceiver> transceiver;
+-    };
+-    void addPendingTrackEvent(PendingTrackEvent&&);
+-
+-    void dispatchTrackEvent(PendingTrackEvent&);
+-
+ private:
+     virtual void doCreateOffer(RTCOfferOptions&&) = 0;
+     virtual void doCreateAnswer(RTCAnswerOptions&&) = 0;
+@@ -255,8 +245,6 @@ private:
+ 
+     bool m_shouldFilterICECandidates { true };
+ 
+-    Vector<PendingTrackEvent> m_pendingTrackEvents;
+-
+ #if !RELEASE_LOG_DISABLED
+     Ref<const Logger> m_logger;
+     const void* m_logIdentifier;
+diff --git a/Source/WebCore/Modules/mediastream/gstreamer/GStreamerMediaEndpoint.cpp b/Source/WebCore/Modules/mediastream/gstreamer/GStreamerMediaEndpoint.cpp
+index 4290f8c3c624..9db2d9397c39 100644
+--- a/Source/WebCore/Modules/mediastream/gstreamer/GStreamerMediaEndpoint.cpp
++++ b/Source/WebCore/Modules/mediastream/gstreamer/GStreamerMediaEndpoint.cpp
+@@ -170,6 +170,11 @@ bool GStreamerMediaEndpoint::initializePipeline()
+     }), this);
+ 
+ #ifndef GST_DISABLE_GST_DEBUG
++    g_signal_connect_swapped(m_webrtcBin.get(), "on-new-transceiver", G_CALLBACK(+[](GStreamerMediaEndpoint* endPoint, GstWebRTCRTPTransceiver* transceiver) {
++        GST_DEBUG_OBJECT(endPoint->m_webrtcBin.get(), "New transceiver: %" GST_PTR_FORMAT, transceiver);
++    }), this);
++
++
+     g_signal_connect(m_webrtcBin.get(), "notify::connection-state", G_CALLBACK(+[](GstElement* webrtcBin, GParamSpec*, GStreamerMediaEndpoint* endPoint) {
+         GstWebRTCPeerConnectionState state;
+         g_object_get(webrtcBin, "connection-state", &state, nullptr);
+@@ -363,6 +368,125 @@ static std::optional<PeerConnectionBackend::DescriptionStates> descriptionsFromW
+     };
+ }
+ 
++struct GStreamerMediaEndpointTransceiverState {
++    String mid;
++    Vector<String> receiverStreamIds;
++    std::optional<RTCRtpTransceiverDirection> firedDirection;
++
++    GStreamerMediaEndpointTransceiverState isolatedCopy() &&;
++};
++
++inline GStreamerMediaEndpointTransceiverState GStreamerMediaEndpointTransceiverState::isolatedCopy() &&
++{
++    return {
++        WTFMove(mid).isolatedCopy(),
++        crossThreadCopy(WTFMove(receiverStreamIds)),
++        firedDirection
++    };
++}
++
++Vector<String> getMediaStreamIdsFromSDPMedia(const GstSDPMedia& media)
++{
++    HashSet<String> mediaStreamIdsSet;
++    for (guint i = 0; i < gst_sdp_media_attributes_len(&media); ++i) {
++        const auto attribute = gst_sdp_media_get_attribute(&media, i);
++        if (!g_strcmp0(attribute->key, "msid")) {
++            auto components = String::fromUTF8(attribute->value).split(' ');
++            if (components.size() < 2)
++                continue;
++            mediaStreamIdsSet.add(components[0]);
++        }
++        // MSID may also come in ssrc attributes, specially if they're in an SDP answer. They look like:
++        // a=ssrc:3612593434 msid:e1019f4a-0983-4863-b923-b75903cced2c webrtctransceiver1
++        if (!g_strcmp0(attribute->key, "ssrc")) {
++            auto outerComponents = String::fromUTF8(attribute->value).split(' ');
++            for (auto& outer : outerComponents) {
++                auto innerComponents = outer.split(':');
++                if (innerComponents.size() < 2)
++                    continue;
++                if (innerComponents[0] == "msid"_s)
++                    mediaStreamIdsSet.add(innerComponents[1]);
++            }
++        }
++    }
++    Vector<String> mediaStreamIds;
++    mediaStreamIds.reserveCapacity(mediaStreamIdsSet.size());
++    for (const auto& msid : mediaStreamIdsSet)
++        mediaStreamIds.append(msid);
++    return mediaStreamIds;
++}
++
++inline bool isRecvDirection(GstWebRTCRTPTransceiverDirection direction)
++{
++    return direction == GST_WEBRTC_RTP_TRANSCEIVER_DIRECTION_SENDRECV || direction == GST_WEBRTC_RTP_TRANSCEIVER_DIRECTION_RECVONLY;
++}
++
++static std::optional<GStreamerMediaEndpointTransceiverState> toGStreamerMediaEndpointTransceiverState(GstElement* webrtcBin, GstWebRTCRTPTransceiver* transceiver)
++{
++    GRefPtr<GstWebRTCRTPReceiver> receiver;
++    GUniqueOutPtr<char> mid;
++    GstWebRTCRTPTransceiverDirection currentDirection;
++    guint mLineIndex;
++    g_object_get(transceiver, "receiver", &receiver.outPtr(), "current-direction", &currentDirection, "mlineindex", &mLineIndex, "mid", &mid.outPtr(), nullptr);
++#ifndef GST_DISABLE_GST_DEBUG
++    GUniquePtr<char> desc(g_enum_to_string(GST_TYPE_WEBRTC_RTP_TRANSCEIVER_DIRECTION, currentDirection));
++    GST_TRACE_OBJECT(webrtcBin, "Receiver = %" GST_PTR_FORMAT ", current-direction = %s, mlineindex = %u, mid = %s", receiver.get(), desc.get(), mLineIndex, GST_STR_NULL(mid.get()));
++#endif
++
++    GUniqueOutPtr<GstWebRTCSessionDescription> localDescription, remoteDescription;
++    g_object_get(webrtcBin, "local-description", &localDescription.outPtr(), "remote-description", &remoteDescription.outPtr(), nullptr);
++
++#ifndef GST_DISABLE_GST_DEBUG
++    if (localDescription) {
++        GUniquePtr<char> sdp(gst_sdp_message_as_text(localDescription->sdp));
++        GST_TRACE_OBJECT(webrtcBin, "Local-description:\n%s", sdp.get());
++    }
++    if (remoteDescription) {
++        GUniquePtr<char> sdp(gst_sdp_message_as_text(remoteDescription->sdp));
++        GST_TRACE_OBJECT(webrtcBin, "Remote-description:\n%s", sdp.get());
++    }
++#endif
++
++    Vector<String> streamIds;
++    if (remoteDescription && remoteDescription->sdp && mLineIndex != std::numeric_limits<guint>::max()) {
++        const GstSDPMedia* media = gst_sdp_message_get_media(remoteDescription->sdp, mLineIndex);
++
++        if (!mid) {
++            const auto midFromSDP = gst_sdp_media_get_attribute_val(media, "mid");
++            mid.outPtr() = g_strdup(midFromSDP);
++            GST_TRACE_OBJECT(webrtcBin, "mid from SDP: %s", GST_STR_NULL(mid.get()));
++        }
++        if (isRecvDirection(currentDirection))
++            streamIds = getMediaStreamIdsFromSDPMedia(*media);
++    }
++
++    if (UNLIKELY(!mid))
++        return { };
++
++    return { { String::fromUTF8(mid.get()), WTFMove(streamIds), { toRTCRtpTransceiverDirection(currentDirection) } } };
++}
++
++static Vector<GStreamerMediaEndpointTransceiverState> transceiverStatesFromWebRTCBin(GstElement* webrtcBin)
++{
++    Vector<GStreamerMediaEndpointTransceiverState> states;
++    GRefPtr<GArray> transceivers;
++    g_signal_emit_by_name(webrtcBin, "get-transceivers", &transceivers.outPtr());
++    GST_TRACE_OBJECT(webrtcBin, "Filling transceiver states for %u transceivers", transceivers ? transceivers->len : 0);
++    if (!transceivers || !transceivers->len)
++        return states;
++
++    states.reserveInitialCapacity(transceivers->len);
++    for (unsigned i = 0; i < transceivers->len; i++) {
++        GstWebRTCRTPTransceiver* transceiver = g_array_index(transceivers.get(), GstWebRTCRTPTransceiver*, i);
++        auto state = toGStreamerMediaEndpointTransceiverState(webrtcBin, transceiver);
++        if (!state)
++            continue;
++        states.append(WTFMove(*state));
++    }
++
++    return states;
++}
++
+ void GStreamerMediaEndpoint::doSetLocalDescription(const RTCSessionDescription* description)
+ {
+     RefPtr initialDescription = description;
+@@ -457,12 +581,32 @@ void GStreamerMediaEndpoint::doSetLocalDescription(const RTCSessionDescription*
+         if (descriptions && !descriptions->currentLocalDescriptionSdp.isEmpty())
+             isIceGatheringComplete = this->isIceGatheringComplete(descriptions->currentLocalDescriptionSdp);
+ 
++#ifndef GST_DISABLE_GST_DEBUG
++        auto dotFileName = makeString(GST_OBJECT_NAME(m_pipeline.get()), ".setLocalDescription"_s);
++        GST_DEBUG_BIN_TO_DOT_FILE_WITH_TS(GST_BIN(m_pipeline.get()), GST_DEBUG_GRAPH_SHOW_ALL, dotFileName.utf8().data());
++#endif
++
++        auto rtcTransceiverStates = transceiverStatesFromWebRTCBin(m_webrtcBin.get());
++        auto transceiverStates = WTF::map(rtcTransceiverStates, [this](auto& state) -> PeerConnectionBackend::TransceiverState {
++            auto streams = WTF::map(state.receiverStreamIds, [this](auto& id) -> RefPtr<MediaStream> {
++                return &mediaStreamFromRTCStream(id);
++            });
++            return { WTFMove(state.mid), WTFMove(streams), state.firedDirection };
++        });
++
+         GRefPtr<GstWebRTCSCTPTransport> transport;
+         g_object_get(m_webrtcBin.get(), "sctp-transport", &transport.outPtr(), nullptr);
+-        m_peerConnectionBackend.setLocalDescriptionSucceeded(WTFMove(descriptions), { }, transport ? makeUnique<GStreamerSctpTransportBackend>(WTFMove(transport)) : nullptr);
+ 
+         if (isIceGatheringComplete && *isIceGatheringComplete)
+             m_peerConnectionBackend.doneGatheringCandidates();
++        std::optional<double> maxMessageSize;
++        if (transport) {
++            uint64_t maxMessageSizeValue;
++            g_object_get(transport.get(), "max-message-size", &maxMessageSizeValue, nullptr);
++            maxMessageSize = static_cast<double>(maxMessageSizeValue);
++        }
++
++        m_peerConnectionBackend.setLocalDescriptionSucceeded(WTFMove(descriptions), WTFMove(transceiverStates), transport ? makeUnique<GStreamerSctpTransportBackend>(WTFMove(transport)) : nullptr);
+     }, [protectedThis = Ref(*this), this](const GError* error) {
+         if (protectedThis->isStopped())
+             return;
+@@ -477,6 +621,22 @@ void GStreamerMediaEndpoint::doSetLocalDescription(const RTCSessionDescription*
+     });
+ }
+ 
++void GStreamerMediaEndpoint::setTransceiverCodecPreferences(const GstSDPMedia& media, guint transceiverIdx)
++{
++    auto direction = getDirectionFromSDPMedia(&media);
++    if (direction == GST_WEBRTC_RTP_TRANSCEIVER_DIRECTION_NONE)
++        return;
++
++    GRefPtr<GstWebRTCRTPTransceiver> rtcTransceiver;
++    g_signal_emit_by_name(m_webrtcBin.get(), "get-transceiver", transceiverIdx, &rtcTransceiver.outPtr());
++    if (!rtcTransceiver)
++        return;
++
++    auto caps = capsFromSDPMedia(&media);
++    GST_TRACE_OBJECT(m_webrtcBin.get(), "Setting codec-preferences to %" GST_PTR_FORMAT, caps.get());
++    g_object_set(rtcTransceiver.get(), "codec-preferences", caps.get(), nullptr);
++}
++
+ void GStreamerMediaEndpoint::doSetRemoteDescription(const RTCSessionDescription& description)
+ {
+     auto initialSDP = description.sdp().isolatedCopy();
+@@ -488,22 +648,32 @@ void GStreamerMediaEndpoint::doSetRemoteDescription(const RTCSessionDescription&
+         unsigned numberOfMedias = gst_sdp_message_medias_len(&message);
+         for (unsigned i = 0; i < numberOfMedias; i++) {
+             const auto* media = gst_sdp_message_get_media(&message, i);
+-            auto direction = getDirectionFromSDPMedia(media);
+-            if (direction == GST_WEBRTC_RTP_TRANSCEIVER_DIRECTION_NONE)
+-                continue;
+-
+-            GRefPtr<GstWebRTCRTPTransceiver> rtcTransceiver;
+-            g_signal_emit_by_name(m_webrtcBin.get(), "get-transceiver", i, &rtcTransceiver.outPtr());
+-            if (!rtcTransceiver)
++            if (UNLIKELY(!media))
+                 continue;
+-
+-            auto caps = capsFromSDPMedia(media);
+-            g_object_set(rtcTransceiver.get(), "codec-preferences", caps.get(), nullptr);
++            setTransceiverCodecPreferences(*media, i);
+         }
+     }, [protectedThis = Ref(*this), this, initialSDP = WTFMove(initialSDP), localDescriptionSdp = WTFMove(localDescriptionSdp), localDescriptionSdpType = WTFMove(localDescriptionSdpType)](const GstSDPMessage& message) {
+         if (protectedThis->isStopped())
+             return;
+ 
++        // To implement https://w3c.github.io/webrtc-pc/#set-remote-description, we need to have the set of transceivers
++        // created after applying the remote offer. However, as of GStreamer 1.24.4, the transceivers in webrtcbin are only
++        // created once an answer is created, which only depends on having the remote offer set beforehand.
++        // Therefore, to force having the transceivers created, we trigger answer creation early, but we do not use the
++        // result or expose the answer to JS yet. It's ok to do so because the only pre-requisite to creating an answer
++        // is having the remote offer applied and we have it at this point. This will trigger the creation of transceivers
++        // internally in webrtcbin, and is also idempotent, so it's ok to be called again by the application.
++        // Additionally, awaiting on the "create-answer" promise here is acceptable because it executes quickly and
++        // doesn't block internally.
++        // FIXME: make this version-dependent once this is fixed in a released version of GStreamer.
++        GstWebRTCSignalingState signalingState;
++        g_object_get(m_webrtcBin.get(), "signaling-state", &signalingState, nullptr);
++        if (signalingState == GST_WEBRTC_SIGNALING_STATE_HAVE_REMOTE_OFFER) {
++            GRefPtr<GstPromise> promise = adoptGRef(gst_promise_new());
++            g_signal_emit_by_name(m_webrtcBin.get(), "create-answer", nullptr, promise.get());
++            gst_promise_wait(promise.get());
++        }
++
+         processSDPMessage(&message, [this](unsigned, const char* mid, const auto* media) {
+             const char* mediaType = gst_sdp_media_get_media(media);
+             m_mediaForMid.set(String::fromLatin1(mid), g_str_equal(mediaType, "audio") ? RealtimeMediaSource::Type::Audio : RealtimeMediaSource::Type::Video);
+@@ -539,13 +709,23 @@ void GStreamerMediaEndpoint::doSetRemoteDescription(const RTCSessionDescription&
+         std::optional<bool> isIceGatheringComplete;
+         if (descriptions && !descriptions->currentLocalDescriptionSdp.isEmpty())
+             isIceGatheringComplete = this->isIceGatheringComplete(descriptions->currentLocalDescriptionSdp);
++#ifndef GST_DISABLE_GST_DEBUG
++        auto dotFileName = makeString(GST_OBJECT_NAME(m_pipeline.get()), ".setRemoteDescription"_s);
++        GST_DEBUG_BIN_TO_DOT_FILE_WITH_TS(GST_BIN(m_pipeline.get()), GST_DEBUG_GRAPH_SHOW_ALL, dotFileName.utf8().data());
++#endif
++
++        auto rtcTransceiverStates = transceiverStatesFromWebRTCBin(m_webrtcBin.get());
++        auto transceiverStates = WTF::map(rtcTransceiverStates, [this](auto& state) -> PeerConnectionBackend::TransceiverState {
++            auto streams = WTF::map(state.receiverStreamIds, [this](auto& id) -> RefPtr<MediaStream> {
++                return &mediaStreamFromRTCStream(id);
++            });
++            return { WTFMove(state.mid), WTFMove(streams), state.firedDirection };
++        });
+ 
+         GRefPtr<GstWebRTCSCTPTransport> transport;
+         g_object_get(m_webrtcBin.get(), "sctp-transport", &transport.outPtr(), nullptr);
+-        m_peerConnectionBackend.setRemoteDescriptionSucceeded(WTFMove(descriptions), { }, transport ? makeUnique<GStreamerSctpTransportBackend>(WTFMove(transport)) : nullptr);
+ 
+-        if (isIceGatheringComplete && *isIceGatheringComplete)
+-            m_peerConnectionBackend.doneGatheringCandidates();
++        m_peerConnectionBackend.setRemoteDescriptionSucceeded(WTFMove(descriptions), WTFMove(transceiverStates), transport ? makeUnique<GStreamerSctpTransportBackend>(WTFMove(transport)) : nullptr);
+     }, [protectedThis = Ref(*this), this](const GError* error) {
+         if (protectedThis->isStopped())
+             return;
+@@ -571,6 +751,8 @@ WEBKIT_DEFINE_ASYNC_DATA_STRUCT(SetDescriptionCallData)
+ 
+ void GStreamerMediaEndpoint::setDescription(const RTCSessionDescription* description, DescriptionType descriptionType, Function<void(const GstSDPMessage&)>&& preProcessCallback, Function<void(const GstSDPMessage&)>&& successCallback, Function<void(const GError*)>&& failureCallback)
+ {
++    GST_DEBUG_OBJECT(m_webrtcBin.get(), "Setting %s description", descriptionType == DescriptionType::Local ? "local" : "remote");
++
+     GUniqueOutPtr<GstSDPMessage> message;
+     auto sdpType = RTCSdpType::Offer;
+ 
+@@ -984,12 +1166,9 @@ void GStreamerMediaEndpoint::connectIncomingTrack(WebRTCTrackData& data)
+             GST_WARNING_OBJECT(m_pipeline.get(), "SDP media for transceiver %u not found, skipping incoming track setup", mLineIndex);
+             return;
+         }
+-
+         transceiver = &m_peerConnectionBackend.newRemoteTransceiver(makeUnique<GStreamerRtpTransceiverBackend>(WTFMove(rtcTransceiver)), data.type, trackIdFromSDPMedia(*media));
+     }
+ 
+-    m_peerConnectionBackend.addPendingTrackEvent({ Ref(transceiver->receiver()), Ref(transceiver->receiver().track()), { }, Ref(*transceiver) });
+-
+     auto mediaStreamBin = adoptGRef(gst_bin_get_by_name(GST_BIN_CAST(m_pipeline.get()), data.mediaStreamBinName.ascii().data()));
+     auto tee = adoptGRef(gst_bin_get_by_name(GST_BIN_CAST(mediaStreamBin.get()), "tee"));
+     GstElement* bin = nullptr;
+@@ -1011,16 +1190,12 @@ void GStreamerMediaEndpoint::connectIncomingTrack(WebRTCTrackData& data)
+     gst_bin_add(GST_BIN_CAST(m_pipeline.get()), bin);
+ 
+     auto& mediaStream = mediaStreamFromRTCStream(data.mediaStreamId);
+-    mediaStream.addTrackFromPlatform(track);
+ 
+-    for (auto& processor : m_trackProcessors) {
+-        if (!processor->isReady())
+-            return;
+-    }
++    GST_DEBUG_OBJECT(m_pipeline.get(), "Incoming streams ready, notifying observers");
++    mediaStream.privateStream().forEachTrack([](auto& track) {
++        track.dataFlowStarted();
++    });
+ 
+-    GST_DEBUG_OBJECT(m_pipeline.get(), "Incoming streams gathered, now dispatching track events");
+-    m_pendingIncomingStreams = 0;
+-    m_peerConnectionBackend.dispatchPendingTrackEvents(mediaStream);
+     gst_element_set_state(m_pipeline.get(), GST_STATE_PLAYING);
+ 
+ #ifndef GST_DISABLE_GST_DEBUG
+@@ -1577,7 +1752,8 @@ void GStreamerMediaEndpoint::collectTransceivers()
+     });
+ 
+     GUniqueOutPtr<GstWebRTCSessionDescription> description;
+-    g_object_get(m_webrtcBin.get(), "remote-description", &description.outPtr(), nullptr);
++    GstWebRTCSignalingState signalingState;
++    g_object_get(m_webrtcBin.get(), "remote-description", &description.outPtr(), "signaling-state", &signalingState, nullptr);
+ 
+     for (unsigned i = 0; i < transceivers->len; i++) {
+         auto current = adoptGRef(g_array_index(transceivers, GstWebRTCRTPTransceiver*, i));
+@@ -1590,16 +1766,24 @@ void GStreamerMediaEndpoint::collectTransceivers()
+         GUniqueOutPtr<char> mid;
+         unsigned mLineIndex;
+         g_object_get(current.get(), "mid", &mid.outPtr(), "mlineindex", &mLineIndex, nullptr);
+-        if (!mid)
+-            continue;
+-
+         const auto* media = gst_sdp_message_get_media(description->sdp, mLineIndex);
+         if (UNLIKELY(!media)) {
+             GST_WARNING_OBJECT(m_pipeline.get(), "SDP media for transceiver %u not found, skipping registration", mLineIndex);
+             continue;
+         }
+-
+-        m_peerConnectionBackend.newRemoteTransceiver(WTF::makeUnique<GStreamerRtpTransceiverBackend>(WTFMove(current)), m_mediaForMid.get(String::fromUTF8(mid.get())), trackIdFromSDPMedia(*media));
++        auto transceiverBackend = WTF::makeUnique<GStreamerRtpTransceiverBackend>(WTFMove(current));
++        // As of GStreamer 1.24.4, webrtcbin's transceivers only have the "mid" property set after the signaling state
++        // is STABLE. However, we need to use the transceiver mid property when signaling is still HAVE_REMOTE_OFFER.
++        // For that, we set the mid from the SDP directly as an alternative for using it in this early stage.
++        // FIXME: make this version-dependent when it's fixed in a released version of GStreamer.
++        if (!mid && signalingState == GST_WEBRTC_SIGNALING_STATE_HAVE_REMOTE_OFFER) {
++            mid.outPtr() = g_strdup(gst_sdp_media_get_attribute_val(media, "mid"));
++            GST_TRACE_OBJECT(m_webrtcBin.get(), "mid from SDP: %s", GST_STR_NULL(mid.get()));
++            transceiverBackend->setMidFromSDP(String::fromUTF8(mid.get()));
++        }
++        if (!mid)
++            continue;
++        m_peerConnectionBackend.newRemoteTransceiver(WTFMove(transceiverBackend), m_mediaForMid.get(String::fromUTF8(mid.get())), trackIdFromSDPMedia(*media));
+     }
+ }
+ 
+diff --git a/Source/WebCore/Modules/mediastream/gstreamer/GStreamerMediaEndpoint.h b/Source/WebCore/Modules/mediastream/gstreamer/GStreamerMediaEndpoint.h
+index c1740d834e1b..02729f68ba57 100644
+--- a/Source/WebCore/Modules/mediastream/gstreamer/GStreamerMediaEndpoint.h
++++ b/Source/WebCore/Modules/mediastream/gstreamer/GStreamerMediaEndpoint.h
+@@ -162,6 +162,8 @@ private:
+ 
+     std::optional<bool> isIceGatheringComplete(const String& currentLocalDescription);
+ 
++    void setTransceiverCodecPreferences(const GstSDPMedia&, guint transceiverIdx);
++
+ #if !RELEASE_LOG_DISABLED
+     void gatherStatsForLogging();
+     void startLoggingStats();
+diff --git a/Source/WebCore/Modules/mediastream/gstreamer/GStreamerPeerConnectionBackend.cpp b/Source/WebCore/Modules/mediastream/gstreamer/GStreamerPeerConnectionBackend.cpp
+index b5b3592c2c60..61c542c7c029 100644
+--- a/Source/WebCore/Modules/mediastream/gstreamer/GStreamerPeerConnectionBackend.cpp
++++ b/Source/WebCore/Modules/mediastream/gstreamer/GStreamerPeerConnectionBackend.cpp
+@@ -324,20 +324,6 @@ void GStreamerPeerConnectionBackend::collectTransceivers()
+     m_endpoint->collectTransceivers();
+ }
+ 
+-void GStreamerPeerConnectionBackend::addPendingTrackEvent(PendingTrackEvent&& event)
+-{
+-    m_pendingTrackEvents.append(WTFMove(event));
+-}
+-
+-void GStreamerPeerConnectionBackend::dispatchPendingTrackEvents(MediaStream& mediaStream)
+-{
+-    auto events = WTFMove(m_pendingTrackEvents);
+-    for (auto& event : events) {
+-        event.streams = Vector<RefPtr<MediaStream>>({ &mediaStream });
+-        dispatchTrackEvent(event);
+-    }
+-}
+-
+ void GStreamerPeerConnectionBackend::removeTrack(RTCRtpSender& sender)
+ {
+     m_endpoint->removeTrack(backendFromRTPSender(sender));
+diff --git a/Source/WebCore/Modules/mediastream/gstreamer/GStreamerPeerConnectionBackend.h b/Source/WebCore/Modules/mediastream/gstreamer/GStreamerPeerConnectionBackend.h
+index 3b74331806cc..ed9ca24b62d8 100644
+--- a/Source/WebCore/Modules/mediastream/gstreamer/GStreamerPeerConnectionBackend.h
++++ b/Source/WebCore/Modules/mediastream/gstreamer/GStreamerPeerConnectionBackend.h
+@@ -98,9 +98,6 @@ private:
+ 
+     void collectTransceivers() final;
+ 
+-    void addPendingTrackEvent(PendingTrackEvent&&);
+-    void dispatchPendingTrackEvents(MediaStream&);
+-
+     bool isLocalDescriptionSet() const final { return m_isLocalDescriptionSet; }
+ 
+     template<typename T>
+@@ -122,7 +119,6 @@ private:
+ 
+     Vector<std::unique_ptr<GStreamerIceCandidate>> m_pendingCandidates;
+     Vector<Ref<RTCRtpReceiver>> m_pendingReceivers;
+-    Vector<PendingTrackEvent> m_pendingTrackEvents;
+ 
+     bool m_isReconfiguring { false };
+ };
+diff --git a/Source/WebCore/Modules/mediastream/gstreamer/GStreamerRtpTransceiverBackend.cpp b/Source/WebCore/Modules/mediastream/gstreamer/GStreamerRtpTransceiverBackend.cpp
+index 93a45b645c9c..21d4e8c2116f 100644
+--- a/Source/WebCore/Modules/mediastream/gstreamer/GStreamerRtpTransceiverBackend.cpp
++++ b/Source/WebCore/Modules/mediastream/gstreamer/GStreamerRtpTransceiverBackend.cpp
+@@ -90,10 +90,22 @@ void GStreamerRtpTransceiverBackend::setDirection(RTCRtpTransceiverDirection dir
+     g_object_set(m_rtcTransceiver.get(), "direction", gstDirection, nullptr);
+ }
+ 
++void GStreamerRtpTransceiverBackend::setMidFromSDP(String&& midFromSDP)
++{
++    m_midFromSDP = WTFMove(midFromSDP);
++}
++
+ String GStreamerRtpTransceiverBackend::mid()
+ {
+     GUniqueOutPtr<char> mid;
+     g_object_get(m_rtcTransceiver.get(), "mid", &mid.outPtr(), nullptr);
++    // As of GStreamer 1.24.4, webrtcbin's transceivers only have the "mid" property set after the signaling state is
++    // STABLE. However, we need to use the transceiver mid property when signaling is still HAVE_REMOTE_OFFER. For that,
++    // we set the mid from the SDP directly as an alternative for using it in this early stage.
++    // FIXME: make this version-dependent when it's fixed in a released version of GStreamer.
++    if (!mid)
++        return m_midFromSDP;
++
+     return String::fromUTF8(mid.get());
+ }
+ 
+diff --git a/Source/WebCore/Modules/mediastream/gstreamer/GStreamerRtpTransceiverBackend.h b/Source/WebCore/Modules/mediastream/gstreamer/GStreamerRtpTransceiverBackend.h
+index c0e91a73a366..a61e4296cc7b 100644
+--- a/Source/WebCore/Modules/mediastream/gstreamer/GStreamerRtpTransceiverBackend.h
++++ b/Source/WebCore/Modules/mediastream/gstreamer/GStreamerRtpTransceiverBackend.h
+@@ -42,6 +42,8 @@ public:
+ 
+     void tearDown();
+ 
++    void setMidFromSDP(String&&);
++
+ private:
+     RTCRtpTransceiverDirection direction() const final;
+     std::optional<RTCRtpTransceiverDirection> currentDirection() const final;
+@@ -53,6 +55,7 @@ private:
+ 
+     GRefPtr<GstWebRTCRTPTransceiver> m_rtcTransceiver;
+     bool m_isStopped { false };
++    String m_midFromSDP;
+ };
+ 
+ } // namespace WebCore
+diff --git a/Source/WebCore/platform/mediastream/MediaStreamTrackPrivate.cpp b/Source/WebCore/platform/mediastream/MediaStreamTrackPrivate.cpp
+index edf944c99c94..084b7aa42568 100644
+--- a/Source/WebCore/platform/mediastream/MediaStreamTrackPrivate.cpp
++++ b/Source/WebCore/platform/mediastream/MediaStreamTrackPrivate.cpp
+@@ -410,6 +410,13 @@ void MediaStreamTrackPrivate::stopProducingData()
+     m_sourceObserver->stop();
+ }
+ 
++void MediaStreamTrackPrivate::dataFlowStarted()
++{
++    forEachObserver([this](auto& observer) {
++        observer.dataFlowStarted(*this);
++    });
++}
++
+ void MediaStreamTrackPrivate::setIsInBackground(bool value)
+ {
+     ASSERT(isMainThread());
+diff --git a/Source/WebCore/platform/mediastream/MediaStreamTrackPrivate.h b/Source/WebCore/platform/mediastream/MediaStreamTrackPrivate.h
+index 6e85b733c0be..fc39c9cff9ef 100644
+--- a/Source/WebCore/platform/mediastream/MediaStreamTrackPrivate.h
++++ b/Source/WebCore/platform/mediastream/MediaStreamTrackPrivate.h
+@@ -64,6 +64,7 @@ public:
+         virtual void trackConfigurationChanged(MediaStreamTrackPrivate&) { };
+         virtual void trackEnabledChanged(MediaStreamTrackPrivate&) = 0;
+         virtual void readyStateChanged(MediaStreamTrackPrivate&) { };
++        virtual void dataFlowStarted(MediaStreamTrackPrivate&) { };
+     };
+ 
+     static Ref<MediaStreamTrackPrivate> create(Ref<const Logger>&&, UniqueRef<MediaStreamTrackDataHolder>&&, std::function<void(Function<void()>&&)>&&);
+@@ -81,11 +82,13 @@ public:
+ 
+     MediaStreamTrackHintValue contentHint() const { return m_contentHint; }
+     void setContentHint(MediaStreamTrackHintValue);
+-    
++
+     void startProducingData();
+     void stopProducingData();
+     bool isProducingData() const { return m_isProducingData; }
+ 
++    void dataFlowStarted();
++
+     bool muted() const { return m_isMuted; }
+     void setMuted(bool);
+     bool interrupted() const { return m_isInterrupted; }
+diff --git a/Source/WebCore/platform/mediastream/gstreamer/GStreamerMediaStreamSource.cpp b/Source/WebCore/platform/mediastream/gstreamer/GStreamerMediaStreamSource.cpp
+index d3a6ced7f760..a92a0b29c463 100644
+--- a/Source/WebCore/platform/mediastream/gstreamer/GStreamerMediaStreamSource.cpp
++++ b/Source/WebCore/platform/mediastream/gstreamer/GStreamerMediaStreamSource.cpp
+@@ -188,12 +188,6 @@ public:
+             return GST_PAD_PROBE_OK;
+         }), nullptr, nullptr);
+ #endif
+-
+-        auto& trackSource = m_track.source();
+-        if (!trackSource.isIncomingAudioSource() && !trackSource.isIncomingVideoSource())
+-            return;
+-
+-        connectIncomingTrack();
+     }
+ 
+     void connectIncomingTrack()
+@@ -385,6 +379,11 @@ public:
+     void trackSettingsChanged(MediaStreamTrackPrivate&) final { };
+     void readyStateChanged(MediaStreamTrackPrivate&) final { };
+ 
++    void dataFlowStarted(MediaStreamTrackPrivate&) final
++    {
++        connectIncomingTrack();
++    }
++
+     void trackEnded(MediaStreamTrackPrivate&) final
+     {
+         GST_INFO_OBJECT(m_src.get(), "Track ended");
+@@ -1100,13 +1099,6 @@ void webkitMediaStreamSrcSignalEndOfStream(WebKitMediaStreamSrc* self)
+ void webkitMediaStreamSrcCharacteristicsChanged(WebKitMediaStreamSrc* self)
+ {
+     GST_DEBUG_OBJECT(self, "MediaStream characteristics changed");
+-    for (auto& source : self->priv->sources) {
+-        auto& trackSource = source->track().source();
+-        if (!trackSource.isIncomingAudioSource() && !trackSource.isIncomingVideoSource())
+-            continue;
+-
+-        source->connectIncomingTrack();
+-    }
+ }
+ 
+ void webkitMediaStreamSrcSetStream(WebKitMediaStreamSrc* self, MediaStreamPrivate* stream, bool isVideoPlayer)
+-- 
+2.39.2
+

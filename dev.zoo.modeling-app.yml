@@ -56,6 +56,9 @@ modules:
       # Will ship in 2.44.3
       - type: patch
         path: 0001-WebRTC-Add-debug-logging-of-TransceiverStates.patch
+      # https://github.com/WebKit/WebKit/pull/30038
+      - type: patch
+        path: 0001-GStreamer-WebRTC-Emit-track-event-before-setRemoteDe.patch
       # Temporary hack:
       - type: patch
         path: 0001-WebKitSettings-Enable-WebRTC-by-default.patch
