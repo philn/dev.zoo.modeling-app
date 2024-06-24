@@ -1,0 +1,65 @@
+From 041e5c360d2be22ba99f211849730aaf6ee6eb72 Mon Sep 17 00:00:00 2001
+From: Philippe Normand <philn@igalia.com>
+Date: Mon, 24 Jun 2024 10:59:34 +0100
+Subject: [PATCH] Build fixes for track events patch
+
+---
+ .../mediastream/gstreamer/GStreamerMediaEndpoint.cpp | 12 ++++++------
+ .../gstreamer/GStreamerPeerConnectionBackend.cpp     |  1 -
+ 2 files changed, 6 insertions(+), 7 deletions(-)
+
+diff --git a/Source/WebCore/Modules/mediastream/gstreamer/GStreamerMediaEndpoint.cpp b/Source/WebCore/Modules/mediastream/gstreamer/GStreamerMediaEndpoint.cpp
+index f51053e3a846..9e5beff1a2e3 100644
+--- a/Source/WebCore/Modules/mediastream/gstreamer/GStreamerMediaEndpoint.cpp
++++ b/Source/WebCore/Modules/mediastream/gstreamer/GStreamerMediaEndpoint.cpp
+@@ -585,14 +585,14 @@ void GStreamerMediaEndpoint::doSetLocalDescription(const RTCSessionDescription*
+         }
+ 
+ #ifndef GST_DISABLE_GST_DEBUG
+-        auto dotFileName = makeString(span(GST_OBJECT_NAME(m_pipeline.get())), ".setLocalDescription"_s);
++        auto dotFileName = makeString(GST_OBJECT_NAME(m_pipeline.get()), ".setLocalDescription"_s);
+         GST_DEBUG_BIN_TO_DOT_FILE_WITH_TS(GST_BIN(m_pipeline.get()), GST_DEBUG_GRAPH_SHOW_ALL, dotFileName.utf8().data());
+ #endif
+ 
+         auto rtcTransceiverStates = transceiverStatesFromWebRTCBin(m_webrtcBin.get());
+         auto transceiverStates = WTF::map(rtcTransceiverStates, [this](auto& state) -> PeerConnectionBackend::TransceiverState {
+-            auto streams = WTF::map(state.receiverStreamIds, [this](auto& id) -> Ref<MediaStream> {
+-                return mediaStreamFromRTCStream(id);
++            auto streams = WTF::map(state.receiverStreamIds, [this](auto& id) -> RefPtr<MediaStream> {
++                return &mediaStreamFromRTCStream(id);
+             });
+             return { WTFMove(state.mid), WTFMove(streams), state.firedDirection };
+         });
+@@ -706,14 +706,14 @@ void GStreamerMediaEndpoint::doSetRemoteDescription(const RTCSessionDescription&
+         }
+ 
+ #ifndef GST_DISABLE_GST_DEBUG
+-        auto dotFileName = makeString(span(GST_OBJECT_NAME(m_pipeline.get())), ".setRemoteDescription"_s);
++        auto dotFileName = makeString(GST_OBJECT_NAME(m_pipeline.get()), ".setRemoteDescription"_s);
+         GST_DEBUG_BIN_TO_DOT_FILE_WITH_TS(GST_BIN(m_pipeline.get()), GST_DEBUG_GRAPH_SHOW_ALL, dotFileName.utf8().data());
+ #endif
+ 
+         auto rtcTransceiverStates = transceiverStatesFromWebRTCBin(m_webrtcBin.get());
+         auto transceiverStates = WTF::map(rtcTransceiverStates, [this](auto& state) -> PeerConnectionBackend::TransceiverState {
+-            auto streams = WTF::map(state.receiverStreamIds, [this](auto& id) -> Ref<MediaStream> {
+-                return mediaStreamFromRTCStream(id);
++            auto streams = WTF::map(state.receiverStreamIds, [this](auto& id) -> RefPtr<MediaStream> {
++                return &mediaStreamFromRTCStream(id);
+             });
+             return { WTFMove(state.mid), WTFMove(streams), state.firedDirection };
+         });
+diff --git a/Source/WebCore/Modules/mediastream/gstreamer/GStreamerPeerConnectionBackend.cpp b/Source/WebCore/Modules/mediastream/gstreamer/GStreamerPeerConnectionBackend.cpp
+index 61c542c7c029..b73079f67fa2 100644
+--- a/Source/WebCore/Modules/mediastream/gstreamer/GStreamerPeerConnectionBackend.cpp
++++ b/Source/WebCore/Modules/mediastream/gstreamer/GStreamerPeerConnectionBackend.cpp
+@@ -195,7 +195,6 @@ void GStreamerPeerConnectionBackend::close()
+ void GStreamerPeerConnectionBackend::doStop()
+ {
+     m_endpoint->stop();
+-    m_pendingReceivers.clear();
+ }
+ 
+ void GStreamerPeerConnectionBackend::doAddIceCandidate(RTCIceCandidate& candidate, AddIceCandidateCallback&& callback)
+-- 
+2.45.2
+

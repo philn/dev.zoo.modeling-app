@@ -59,6 +59,8 @@ modules:
       # https://github.com/WebKit/WebKit/pull/30038
       - type: patch
         path: 0001-GStreamer-WebRTC-Emit-track-event-before-setRemoteDe.patch
+      - type: patch
+        path: 0001-Build-fixes-for-track-events-patch.patch
       # Temporary hack:
       - type: patch
         path: 0001-WebKitSettings-Enable-WebRTC-by-default.patch
