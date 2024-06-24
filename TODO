@@ -1,0 +1,3 @@
+- CI :)
+- CI: Generate the various json source files (cargo-sources.json, cargo-wasm-sources.json)
+- Ideally the logo should come from the kittycad install, but the current one isn't square, so I edited it in inkscape and bundled it here.
