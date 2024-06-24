@@ -13,4 +13,4 @@ yarn config --offline set yarn-offline-mirror /run/build/ZooModelingApp/flatpak-
 yarn install --offline
 yarn build:wasm
 yarn build:local
-yarn tauri build --no-bundle --features ""
+yarn tauri build --no-bundle --features "" -c src-tauri/taure.release.conf.json
