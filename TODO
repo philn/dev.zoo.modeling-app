@@ -4,3 +4,4 @@
 - Aim to reduce the amount of downstream WebKitGTK patches, ideally the WebKitGTK version from the GNOME runtime should be used and we shouldn't need a custom build here.
 - Get rid of the `WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS` hack in the app launcher script. See https://bugs.webkit.org/show_bug.cgi?id=244002
 - Proper offline building: Currently network is required because the Rust Flatpak extension cannot be used as-is (not including rustwasm).
+- Move this repo either to Zoo's GH org, or Flathub org.
